@@ -1,0 +1,411 @@
+\begin{interp}{论文解读}
+
+\isec{一、这篇论文在解决什么问题}
+
+这篇论文要做的事情可以用一句话概括：\textbf{拿一个普通摄像头拍视频，不用事先测量相机参数，就能实时算出相机的运动轨迹，同时建出每个像素都有三维位置的稠密地图。}
+
+作者在引言里指出了当时的三个现实问题。第一，视觉 SLAM 还不是“即插即用”的，要懂硬件、要标定相机。第二，只用一个摄像头、不借助 IMU 等其他传感器，还没有系统能在随手拍的视频上同时给出准确的轨迹和一致的稠密地图。第三，MASt3R 这类网络虽然强大，但一次只处理两张图；已有的做法 MASt3R-SfM 要把所有照片收集齐再一起优化，只能离线使用，做不到实时。
+
+本文的做法是：\textbf{以 MASt3R 为唯一的核心先验，从零开始搭一个实时的 SLAM 系统}，匹配、跟踪、融合、闭环、优化每个环节都围绕 MASt3R 的输出重新设计。
+
+\begin{center}
+\begin{tikzpicture}[font=\small,box/.style={draw,thick,minimum height=0.8cm,align=center}]
+\draw[fill=black!8] (0,0.7) rectangle ++(1.5,1.05); \node at (0.75,1.22) {图 $i$};
+\draw[fill=black!8] (0,-0.6) rectangle ++(1.5,1.05); \node at (0.75,-0.08) {图 $j$};
+\node[box,minimum width=2.6cm] (m) at (4.2,0.55) {MASt3R\\\footnotesize 一次前向计算};
+\draw[-{Stealth},thick] (1.6,1.2) -- (m.west); \draw[-{Stealth},thick] (1.6,-0.1) -- (m.west);
+\node[box,minimum width=5.4cm,anchor=west] (o1) at (6.6,1.45) {点图 $\mathbf{X}^i_i,\ \mathbf{X}^j_i$：两张图每个像素的三维坐标};
+\node[box,minimum width=5.4cm,anchor=west] (o2) at (6.6,0.55) {置信度 $\mathbf{C}^i_i,\ \mathbf{C}^j_i$：每个点有多可靠};
+\node[box,minimum width=5.4cm,anchor=west] (o3) at (6.6,-0.35) {特征 $\mathbf{D}^i_i,\ \mathbf{D}^j_i$：用于匹配的描述};
+\foreach \k in {1,2,3} \draw[-{Stealth}] (m.east) -- (o\k.west);
+\end{tikzpicture}
+\tucap{图 1\quad MASt3R 的输入和输出。关键在于两张点图都表示在相机 $i$ 的坐标系下，可以直接放在一起比较}
+\end{center}
+
+\isec{二、逐节导读：原文每一节在讲什么}
+
+原文正文 8 页。方法集中在第 3 节，大约 3 页，是全文的重点；第 4 节实验占 3 页，其中第 4.4 节的组件分析最值得细看，它逐一验证了每个设计选择。
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{>{\raggedright\arraybackslash}p{2.9cm}>{\raggedright\arraybackslash}p{6.3cm}>{\raggedright\arraybackslash}p{6.2cm}c}
+\toprule
+原文章节 & 这一节讲什么 & 读的时候抓住什么 & 难度\\
+\midrule
+摘要、图 1 & 以 MASt3R 为先验的实时单目稠密 SLAM，15 帧/秒 & 只假设“唯一相机中心”这一句 & 低\\
+1\enspace 引言 & SLAM 还不能即插即用；两视图先验的意义 & 作者为什么选“两张图”而不是“多张图” & 低\\
+2\enspace 相关工作 & 稀疏/稠密 SLAM、多视图先验、DUSt3R 系列 & 可跳读；DUSt3R、MASt3R、MASt3R-SfM 三篇要知道 & 低\\
+3.1\enspace 预备知识 & MASt3R 的输出，Sim(3) 位姿，式 (1) & 为什么位姿里要带缩放 & 中\\
+3.2\enspace 点图匹配 & 迭代投影匹配，式 (2)(3)，图 2 & 核心贡献之一，配合延伸讲解“迭代投影匹配” & 高\\
+3.3\enspace 跟踪与融合 & 点误差与射线误差，式 (4)--(8) & 全文最关键的一节，逐句读 & 高\\
+3.4\enspace 建图与闭环 & 关键帧判定，ASMK 检索，两道门槛 & 增量检索怎样改造 & 中\\
+3.5\enspace 后端优化 & 全局射线误差式 (9)，二阶优化 & 配合延伸讲解“二阶优化、海森矩阵与规范自由度” & 高\\
+3.6、3.7 & 重定位；已知标定时的两处修改，式 (10) & 有标定时误差从射线换成像素 & 中\\
+4.1、4.2\enspace 实验 & TUM、7-Scenes、ETH3D、EuRoC 的轨迹和重建 & 有标定与无标定分开看；轨迹和几何分开看 & 中\\
+4.4\enspace 组件分析 & 表 4--7：匹配、融合、误差形式、闭环 & 每张表对应一个设计选择 & 中\\
+5\enspace 局限 & 几何不参与全局优化、镜头畸变、解码器慢 & 可以接着做的方向 & 低\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+建议的阅读顺序是：摘要 → 图 3（系统框图）→ 第 3.3 节 → 图 2 与第 3.2 节 → 表 4--7 → 第 3.4、3.5 节 → 表 1、表 3 → 第 5 节。先抓住“一切误差都按射线来算”这条主线，其余各节都是它在不同环节的应用。
+
+\isec{三、核心思想：只假设相机中心，一切用“射线”来算}
+
+\isub{1. 不要相机参数}
+
+传统 SLAM 需要知道相机模型，才能算出某个像素对应空间里的哪条光线。本文反过来：点图已经给出了每个像素的三维点，把点除以它到相机中心的距离，就得到这个像素的光线方向（正文第 3.1 节后的整页讲解有详细图示）。所有像素的光线方向合在一起，就是这台相机的“相机模型”。整篇论文对相机只假设一件事：所有光线都经过同一个相机中心。
+
+这样做的直接好处是不用标定；更进一步，拍摄过程中变焦、甚至每帧的相机都不一样，系统也能处理，因为每一张点图都自带了它自己的相机模型。
+
+\isub{2. 为什么误差要按光线方向来算}
+
+MASt3R 最不可靠的是深度，也就是点离相机多远。同一个点，在不同帧里预测出的深度可能相差不少，但方向往往比较准。看下面这个例子：
+
+\begin{center}
+\begin{tikzpicture}[font=\small]
+\fill (0,0) circle (2.5pt) node[below left] {相机中心};
+\draw[thick,gray] (0,0) -- (9,2.25);
+\fill (5,1.25) circle (2.5pt) node[above left] {真实点 $P$};
+\fill[black!55] (7.6,1.9) circle (2.5pt) node[above] {预测点 $P'$};
+\draw[{Stealth}-{Stealth},thick] (5,0.95) -- (7.6,1.6) node[midway,below,sloped] {三维距离误差很大};
+\node[align=left,anchor=west] at (9.4,1.2) {深度错了，$P'$ 仍在同一条光线上：\\光线夹角误差为 0，\\三维点误差却很大};
+\end{tikzpicture}
+\tucap{图 2\quad 深度预测错误时，三维点误差会被放大，光线方向的误差却不受影响}
+\end{center}
+
+如果用三维点误差来求位姿，一个深度错得离谱的点会把整个估计拉偏；用光线夹角误差就不会。另外，夹角误差有上限（最多 180 度），个别错误匹配的影响也有限。作者的消融实验（原文表 6）直接验证了这一点：
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, area legend, width=12cm, height=5cm, bar width=16pt, ymin=0, ymax=0.33,
+  symbolic x coords={TUM,7-Scenes,EuRoC,平均}, xtick=data, ylabel={ATE（米）},
+  legend style={at={(0.02,0.97)},anchor=north west,font=\footnotesize}, ate labels, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge x limits=0.18]
+\addplot[fill=black!20] coordinates {(TUM,0.092) (7-Scenes,0.084) (EuRoC,0.290) (平均,0.155)};
+\addplot[fill=black!70] coordinates {(TUM,0.060) (7-Scenes,0.066) (EuRoC,0.164) (平均,0.097)};
+\legend{三维点误差,光线夹角误差}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 3\quad 无标定时两种误差形式的对比（原文表 6）。改用光线误差后，平均误差下降约 37\%}
+\end{center}
+
+\isec{四、系统流程}
+
+\begin{center}
+\begin{tikzpicture}[font=\small,node distance=0.55cm,
+  s/.style={draw,thick,rounded corners=2pt,minimum height=0.85cm,align=center,text width=2.35cm},
+  b/.style={draw,thick,rounded corners=2pt,minimum height=0.85cm,align=center,text width=2.35cm,fill=black!8}]
+\node[s] (in) {新的一帧};
+\node[s,right=of in] (mm) {MASt3R 预测\\（与当前关键帧）};
+\node[s,right=of mm] (mt) {迭代投影匹配\\约 2 ms};
+\node[s,right=of mt] (tr) {跟踪：求 Sim(3)\\相对位姿};
+\node[s,below=0.9cm of tr] (fu) {点图融合\\加权平均};
+\node[s,left=of fu] (kf) {匹配太少？\\设为新关键帧};
+\node[b,left=of kf] (rt) {检索相似的\\旧关键帧};
+\node[b,left=of rt] (lc) {MASt3R 验证\\加闭环边};
+\node[b,below=0.9cm of lc] (be) {后端二阶优化\\所有关键帧位姿};
+\draw[-{Stealth},thick] (in)--(mm); \draw[-{Stealth},thick] (mm)--(mt); \draw[-{Stealth},thick] (mt)--(tr);
+\draw[-{Stealth},thick] (tr)--(fu); \draw[-{Stealth},thick] (fu)--(kf); \draw[-{Stealth},thick] (kf)--(rt);
+\draw[-{Stealth},thick] (rt)--(lc); \draw[-{Stealth},thick] (lc)--(be);
+\node[right=0.4cm of be,align=left,font=\footnotesize] {白色：每一帧都做（前端）\\灰色：每个新关键帧做一次（后端）};
+\end{tikzpicture}
+\tucap{图 4\quad MASt3R-SLAM 的处理流程（对应原文图 3）}
+\end{center}
+
+系统以关键帧为骨架。每来一帧，都和最近的关键帧一起送进 MASt3R，找像素对应，求出相对位姿，再把这一帧的预测融合进关键帧的点图。当匹配数太少（说明相机已经走远），就把当前帧设为新关键帧，然后去数据库里检索它是否回到了以前来过的地方，最后对所有关键帧做一次全局优化。跟丢时则触发重定位。下面几节依次解读每个环节。
+
+\isec{五、匹配：从 2 秒到 2 毫秒}
+
+匹配是 SLAM 的地基，跟踪和建图都依赖它。MASt3R 自带的稠密匹配要 2 秒，放进 SLAM 里整个系统每秒只能处理 0.4 帧。本文把“在全图里搜索对应像素”改写成“对每个点单独求一个平滑函数的最小值”，并在显卡上让几十万个点同时求解（正文第 3.2 节后的整页讲解有逐步说明）。
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[xbar, xmode=log, width=12cm, height=4.6cm, bar width=10pt, xmin=0.1, xmax=10000,
+  xlabel={匹配一对图的耗时（毫秒，对数坐标）},
+  symbolic y coords={本文：几何+特征精修,本文：仅几何,k-d 树,MASt3R 自带},
+  ytick=data, y tick label style={font=\small}, nodes near coords, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge y limits=0.18, log origin=infty]
+\addplot[fill=black!35] coordinates {(2000,MASt3R 自带) (40,k-d 树) (0.5,本文：仅几何) (2,本文：几何+特征精修)};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 5\quad 不同匹配方法的耗时（原文表 4）。横轴是对数坐标，每一格相差 10 倍}
+\end{center}
+
+从 2000 毫秒到 2 毫秒，快了一千倍，整个系统的帧率因此提高近 40 倍。值得注意的是“特征精修”这一步：只用几何时有标定的 ATE 是 0.062 米，加上特征精修后降到 0.039 米，而耗时只多了 1.5 毫秒。几何匹配负责快速找到大致位置，网络特征负责最后的精确对准，两者分工很清楚。
+
+\isec{六、跟踪与点图融合}
+
+\isub{1. 跟踪：求当前帧相对关键帧的位姿}
+
+有了匹配，就可以求当前帧相对最近关键帧的变换。这里的变换是 Sim(3)，除了旋转和平移，还包括一个缩放，因为 MASt3R 每次预测的尺度都不一样。求解目标是让所有匹配点的光线夹角误差最小，用迭代重加权最小二乘（每次迭代根据误差重新分配权重，误差越大的匹配权重越小）配合高斯-牛顿法求解。
+
+目标函数里还加了一项权重很小的“到相机中心的距离差”。原因是：相机原地转动时，所有光线都绕同一个中心旋转，光线方向的误差里完全没有距离信息，缩放比例就无法确定。加上这一小项，就能在纯旋转时保持稳定，又不会让深度误差带来明显偏差。
+
+\isub{2. 融合：同一处看得越多越准}
+
+关键帧的点图最初只来自一两次预测，基线小、误差大。之后每一帧跟踪完，都把它的预测变换到关键帧坐标系下，按置信度做加权平均，得到“规范点图”。看一个数值例子：某个点的真实深度是 2.00 米，先后四次预测和置信度如下。
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=11.5cm, height=5cm, xmin=0.6, xmax=4.4, ymin=1.85, ymax=2.5, xtick={1,2,3,4},
+  xlabel={融合进来的预测次数}, ylabel={深度（米）}, legend style={font=\footnotesize,at={(0.98,0.98)},anchor=north east}]
+\addplot[only marks,mark=o,mark size=3pt,thick] coordinates {(1,2.40) (2,2.05) (3,1.98) (4,2.10)};
+\addplot[thick,mark=square*,mark size=2.2pt] coordinates {(1,2.40) (2,2.114) (3,2.050) (4,2.061)};
+\addplot[dashed,thick,domain=0.6:4.4] {2.0};
+\node[font=\footnotesize,anchor=south] at (axis cs:1,2.41) {置信度 0.2};
+\node[font=\footnotesize,anchor=north] at (axis cs:2,2.04) {0.9};
+\node[font=\footnotesize,anchor=north] at (axis cs:3,1.97) {1.0};
+\node[font=\footnotesize,anchor=south] at (axis cs:4,2.11) {0.6};
+\legend{单次预测,加权平均后的估计,真实深度}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 6\quad 加权平均融合。置信度只有 0.2 的第一次预测偏差很大，后面高置信度的预测很快把估计拉回 2.06 米附近}
+\end{center}
+
+第一次预测是 2.40 米，但置信度只有 0.2；第二次 2.05 米、置信度 0.9，加权平均后估计立刻修正到 $(2.40\times0.2+2.05\times0.9)/(0.2+0.9)\approx2.11$ 米。四次之后是 2.06 米，而简单平均会是 2.13 米。置信度越高的预测话语权越大，这就是加权的意义。
+
+作者对比了四种更新规范点图的方式：
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, area legend, width=11.5cm, height=4.8cm, bar width=15pt, ymin=0, ymax=0.24,
+  symbolic x coords={只用最新的,只用第一次的,置信度中位数最高的,加权平均}, xtick=data, x tick label style={font=\small},
+  ylabel={平均 ATE（米）}, legend style={at={(0.98,0.97)},anchor=north east,font=\footnotesize},
+  ate labels, nodes near coords style={font=\footnotesize}, every axis plot/.append style={draw=black}, enlarge x limits=0.15]
+\addplot[fill=black!20] coordinates {(只用最新的,0.207) (只用第一次的,0.114) (置信度中位数最高的,0.102) (加权平均,0.097)};
+\addplot[fill=black!70] coordinates {(只用最新的,0.160) (只用第一次的,0.059) (置信度中位数最高的,0.039) (加权平均,0.039)};
+\legend{无标定,有标定}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 7\quad 规范点图的四种更新方式（原文表 5）}
+\end{center}
+
+只用最新一次的预测会不断引入新的误差，产生漂移；只用第一次的预测基线不足。加权平均在无标定时最好，说明\textbf{融合的不只是深度，也融合了相机模型本身}：每次预测都自带光线方向，平均之后相机模型也更准了。
+
+\isec{七、闭环、重定位与后端优化}
+
+\isub{1. 闭环：认出回到了来过的地方}
+
+新关键帧建立后，用 MASt3R 编码器的特征去检索数据库。作者把 MASt3R-SfM 使用的 ASMK 检索方法改造成可以增量工作：每来一个新关键帧，就把它的特征加进倒排索引。检索出最相似的几个旧关键帧后，分数超过阈值的，再交给 MASt3R 解码器生成点图并做匹配，匹配数足够多才加一条闭环边。两道门槛，避免误判。
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, area legend, width=11.5cm, height=4.8cm, bar width=16pt, ymin=0, ymax=0.27,
+  symbolic x coords={TUM,7-Scenes,EuRoC}, xtick=data, ylabel={ATE（米）},
+  legend style={at={(0.02,0.97)},anchor=north west,font=\footnotesize}, ate labels, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge x limits=0.25]
+\addplot[fill=black!20] coordinates {(TUM,0.064) (7-Scenes,0.066) (EuRoC,0.233)};
+\addplot[fill=black!70] coordinates {(TUM,0.030) (7-Scenes,0.047) (EuRoC,0.029)};
+\legend{无闭环,有闭环}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 8\quad 闭环的作用（原文表 7，有标定）。EuRoC 序列最长，误差从 0.233 米降到 0.029 米}
+\end{center}
+
+序列越长，闭环的作用越大。EuRoC 的误差降低了八成多，这说明\textbf{MASt3R 的输出仍然有系统性偏差，会随时间累积成漂移}，不能只靠网络本身，必须依靠闭环和后端来消除。
+
+\isub{2. 后端：二阶优化}
+
+每加入一个新关键帧，后端就对所有关键帧的位姿做一次联合优化，让所有边上的光线误差之和最小。以往基于 DUSt3R 的方法用一阶优化，每次迭代后还要重新缩放，很慢；本文用高斯-牛顿法加稀疏 Cholesky 分解，利用误差曲面的弯曲程度，通常几步就收敛，每个新关键帧最多迭代 10 次。整页讲解（正文第 3.5 节后）说明了二阶优化、稀疏结构和规范自由度。
+
+\isub{3. 重定位}
+
+匹配数太少时判定为跟丢。此时对新来的帧用更严格的阈值检索数据库，找到匹配足够多的旧关键帧后，把当前帧作为新关键帧接回图中，恢复跟踪。这一点在 VGGT-SLAM 2.0 里是缺失的，是两者的一个重要区别。
+
+\isec{八、把公式逐个读懂}
+
+正文共 10 个编号公式。它们其实只围绕三件事：位姿怎么表示（式 1），误差怎么算（式 2--6、9、10），怎么求解和融合（式 7、8）。
+
+\isub{1. 式 (1)：带缩放的位姿 Sim(3)}
+
+\[ \mathbf{T}=\begin{bmatrix}s\mathbf{R}&\mathbf{t}\\ \mathbf{0}&1\end{bmatrix},\qquad \mathbf{T}\leftarrow\boldsymbol{\tau}\oplus\mathbf{T}\triangleq\Exp(\boldsymbol{\tau})\circ\mathbf{T}. \]
+左边是位姿：旋转 $\mathbf{R}$、平移 $\mathbf{t}$ 之外多了一个缩放 $s$。原因在第 3.1 节：MASt3R 每次预测的尺度都不一样，同一张桌子这次预测成 1 米宽，下次可能是 1.2 米。若只用旋转加平移，这 20\% 的差异无处安放；有了 $s$，就可以把它吸收掉（$s=1.2$ 表示把这次的结果整体放大 1.2 倍）。右边是更新方式：$\boldsymbol{\tau}$ 是一个 7 维的小增量（3 个平移、3 个旋转、1 个缩放），$\Exp$ 把它变成一个真正的 Sim(3) 矩阵，再乘到原位姿上。这样保证更新后的矩阵仍然是合法的旋转加缩放，不会因为直接加减矩阵元素而“变形”。
+
+\isub{2. 式 (2)(3)：射线差和夹角是一回事}
+
+式 (2) 的 $\psi$ 表示“把三维点除以它的长度”，得到长度为 1 的射线方向。匹配就是在参考图里找一个像素 $\mathbf{p}$，使它的射线和查询点的射线尽量重合。式 (3) 说明为什么这样做合理：两个单位向量之差的平方，恰好等于 $2(1-\cos\theta)$，只由两者的夹角 $\theta$ 决定。
+
+\begin{center}
+\begin{tikzpicture}[font=\small]
+\draw[black!40] (0,0) circle (2.4cm);
+\fill (0,0) circle (2pt) node[below left] {相机中心};
+\draw[-{Stealth},thick] (0,0) -- (35:2.4) node[above right] {$\psi_1$};
+\draw[-{Stealth},thick] (0,0) -- (10:2.4) node[right] {$\psi_2$};
+\draw[very thick,dashed] (35:2.4) -- (10:2.4) node[midway,right=2pt] {$\|\psi_1-\psi_2\|$};
+\draw (10:0.8) arc (10:35:0.8); \node at (22:1.1) {$\theta$};
+\node[align=left,anchor=west] at (4.2,0.9) {单位圆：两条射线长度都是 1};
+\node[align=left,anchor=west] at (4.2,0.1) {弦长的平方 $=2(1-\cos\theta)$};
+\node[align=left,anchor=west] at (4.2,-0.7) {例：$\theta=10^\circ$ 时，弦长 $=0.174$，弧度 $=0.175$};
+\end{tikzpicture}
+\tucap{图 9\quad 射线误差的几何意义。夹角较小时，弦长几乎等于以弧度计的夹角}
+\end{center}
+
+这个等式的实际意义是：误差只与方向有关，与点离相机多远无关，深度预测错得再厉害，也不会进入这项误差（第三节图 2 的情形）；同时误差有上限，两条射线最多相差 180 度，弦长最大为 2，个别错误匹配的影响被自然限制住。
+
+\isub{3. 式 (4)(5)(6)：带权重的误差}
+
+式 (4) 是直接比较三维点的误差，式 (6) 把其中两个点都换成射线，其余部分完全相同。两个式子的分母都是式 (5) 定义的权重函数：
+\[ w(\mathbf{q},\sigma^2)=\begin{cases}\sigma^2/\mathbf{q}&\mathbf{q}>\mathbf{q}_{\min}\\ \infty&\text{否则}\end{cases} \]
+$\mathbf{q}$ 是匹配置信度。置信度越高，$w$ 越小，误差除以它之后被放大，在求解中的话语权就越大；置信度低于门槛 $\mathbf{q}_{\min}$ 时，$w$ 取无穷大，误差被除成 0，这个匹配等于被扔掉。$\sigma^2$ 则把不同量纲的误差（射线、距离、像素）调到可比的尺度。
+
+外面的 $\|\cdot\|_\rho$ 是 Huber 范数。它在误差小的时候和平方一样，误差大了之后改成线性增长：
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=10.5cm, height=5.2cm, xmin=-3, xmax=3, ymin=0, ymax=4.6, xlabel={误差 $r$}, ylabel={代价},
+  legend style={at={(0.5,0.97)},anchor=north,font=\footnotesize}, samples=121, domain=-3:3]
+\addplot[thick,dashed] {x^2/2};
+\addplot[very thick] {abs(x)<=1 ? x^2/2 : abs(x)-0.5};
+\draw[black!40] (axis cs:-1,0) -- (axis cs:-1,4.6); \draw[black!40] (axis cs:1,0) -- (axis cs:1,4.6);
+\node[font=\footnotesize,anchor=south] at (axis cs:1.95,2.05) {线性增长};
+\node[font=\footnotesize] at (axis cs:0,1.45) {二次};
+\legend{平方误差,Huber（阈值为 1）}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 10\quad 平方误差与 Huber 代价。误差为 3 时，平方代价是 4.5，Huber 只有 2.5}
+\end{center}
+
+用平方误差时，一个误差为 10 的外点贡献 50，相当于 100 个误差为 1 的正常点加在一起（每个 0.5），会把结果拉偏；Huber 下它只贡献 9.5。射线误差本身有上限，再加上 Huber 和置信度权重，三道保险叠在一起，就是跟踪稳定的原因。
+
+\isub{4. 式 (7)：高斯-牛顿法一步步求位姿}
+
+\[ (\mathbf{J}^\top\mathbf{W}\mathbf{J})\,\boldsymbol{\tau}=-\mathbf{J}^\top\mathbf{W}\mathbf{r},\qquad \mathbf{T}_{kf}\leftarrow\boldsymbol{\tau}\oplus\mathbf{T}_{kf}. \]
+$\mathbf{r}$ 把所有匹配的误差排成一列；$\mathbf{J}$ 是雅可比矩阵，描述位姿稍微动一点时每个误差会怎样变化；$\mathbf{W}$ 是权重。高斯-牛顿法的思路是：在当前位姿附近，把误差近似成位姿增量的线性函数，于是“让误差平方和最小”变成解一个线性方程组。未知数 $\boldsymbol{\tau}$ 只有 7 个，所以 $\mathbf{J}^\top\mathbf{W}\mathbf{J}$ 是 $7\times7$ 的小矩阵，无论有多少匹配点，解方程都很快。求出增量后更新位姿，再重新计算误差和权重，重复几次就收敛了。“迭代重加权”指的就是每一轮都按新的误差重新计算 Huber 权重 $\mathbf{W}$。
+
+\isub{5. 式 (8)：融合就是加权平均}
+
+\[ \tilde{\mathbf{X}}^k_k\leftarrow\frac{\tilde{\mathbf{C}}^k_k\tilde{\mathbf{X}}^k_k+\mathbf{C}^k_f(\mathbf{T}_{kf}\mathbf{X}^k_f)}{\tilde{\mathbf{C}}^k_k+\mathbf{C}^k_f},\qquad \tilde{\mathbf{C}}^k_k\leftarrow\tilde{\mathbf{C}}^k_k+\mathbf{C}^k_f. \]
+分子是“旧估计 $\times$ 旧的累计置信度 + 新预测 $\times$ 新置信度”，分母是两者置信度之和；第二个式子把置信度累加起来。这正是第六节图 6 的计算过程：累计置信度越大，旧估计越难被新的一次预测改动，估计因此越来越稳定。
+
+\isub{6. 式 (9)(10)：后端与有标定的情形}
+
+式 (9) 就是把式 (6) 从“一对帧”推广到“图里所有的边”，未知数变成所有关键帧的位姿。$N$ 个关键帧有 $7N$ 个未知数，但每条边只牵涉两个关键帧，所以方程组的系数矩阵绝大部分是零，可以用稀疏 Cholesky 分解快速求解（正文第 3.5 节后的延伸讲解有图示）。式 (10) 是已知相机内参时的版本：误差不再比较射线，而是比较像素，即把匹配到的三维点用已知的相机模型投影回图像，看它离实际像素有多远。像素误差和相机成像过程直接对应，所以有标定时更准。
+
+\Needspace{20\baselineskip}\isec{九、实验结果怎么读}
+
+\isub{1. 轨迹精度}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[xbar, width=12cm, height=6.2cm, bar width=9pt, xmin=0, xmax=0.19,
+  xlabel={TUM RGB-D 平均 ATE（米），越短越好},
+  symbolic y coords={本文（有标定）,GO-SLAM,DROID-SLAM,DPV-SLAM++,DPV-SLAM,本文（无标定）,DROID-SLAM*（无标定）},
+  ytick=data, y tick label style={font=\small}, ate labels, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge y limits=0.1]
+\addplot[fill=black!25] coordinates {(0.158,DROID-SLAM*（无标定）) (0.060,本文（无标定）) (0.076,DPV-SLAM) (0.054,DPV-SLAM++) (0.038,DROID-SLAM) (0.035,GO-SLAM) (0.030,本文（有标定）)};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 11\quad TUM RGB-D 上的平均误差（原文表 1）}
+\end{center}
+
+有标定时，本文在 TUM 上是所有方法中最好的（0.030 米）。更值得注意的是无标定的对比：作者构造了一个基线 DROID-SLAM*，先用 GeoCalib 在第一张图上估计内参，再交给 DROID-SLAM 运行，误差是 0.158 米；本文无标定版本为 0.060 米，而且没有假设整段视频的相机参数固定不变。
+
+此前表现最好的 DROID-SLAM、DPV-SLAM、GO-SLAM 都建立在 DROID-SLAM 的匹配方法和端到端框架之上。本文是一条完全不同的路：用一个现成的几何先验，也能达到甚至超过它们的精度。
+
+但在 EuRoC 无人机数据集上，本文（0.041 米）不如 DROID-SLAM（0.022 米）。作者给出两点解释：EuRoC 是灰度图像，DROID-SLAM 在训练时专门加入了 10\% 的灰度图；EuRoC 镜头畸变大，而 MASt3R 只在普通针孔相机图像上训练过，无标定时只能先对图像去畸变再运行，无标定误差也因此明显变大（0.164 米）。
+
+\Needspace{16\baselineskip}\isub{2. 重建质量：轨迹差一点，几何却更好}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, area legend, width=13cm, height=5.2cm, bar width=15pt, ymin=0, ymax=0.215,
+  symbolic x coords={准确度,完整度,倒角距离}, xtick=data, ylabel={误差（米），越低越好},
+  legend style={at={(0.5,1.03)},anchor=south,font=\footnotesize,legend columns=3,/tikz/every even column/.append style={column sep=8pt}},
+  ate labels, nodes near coords style={font=\scriptsize,rotate=90,anchor=west},
+  every axis plot/.append style={draw=black}, enlarge x limits=0.25]
+\addplot[fill=black!15] coordinates {(准确度,0.173) (完整度,0.061) (倒角距离,0.117)};
+\addplot[fill=black!55] coordinates {(准确度,0.099) (完整度,0.071) (倒角距离,0.085)};
+\addplot[fill=black!85] coordinates {(准确度,0.108) (完整度,0.072) (倒角距离,0.090)};
+\legend{DROID-SLAM,本文（有标定）,本文（无标定）}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 12\quad EuRoC 上的三维重建质量（原文表 3）}
+\end{center}
+
+这张图和上一节的结论正好相反：在 EuRoC 上，DROID-SLAM 的轨迹更准，但本文的三维模型更好，倒角距离 0.085 米对 0.117 米。原因是 DROID-SLAM 估计出大量围绕真实表面的噪声点，完整度高（覆盖得全），准确度却差（乱点多）；本文的点图经过多次融合，点更“干净”。这说明\textbf{轨迹精度和地图质量是两件事}，评价一个稠密 SLAM 系统时两者都要看。
+
+另外两个数据集的结果：7-Scenes 上本文有标定版本（0.047 米）略好于 DROID-SLAM（0.049 米）；在难度很高、相机运动很快的 ETH3D-SLAM 上，本文在成功完成的序列数量和曲线下面积上都是最好的，说明它的强项是鲁棒性。
+
+\Needspace{16\baselineskip}\isub{3. 时间都花在哪}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[xbar, width=12cm, height=4.4cm, bar width=10pt, xmin=0, xmax=31,
+  xlabel={每帧跟踪各环节的平均耗时（毫秒）},
+  symbolic y coords={匹配,求解位姿,MASt3R 编码器,MASt3R 解码器},
+  ytick=data, y tick label style={font=\small}, nodes near coords, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge y limits=0.18]
+\addplot[fill=black!35] coordinates {(26.2,MASt3R 解码器) (13.2,MASt3R 编码器) (2.2,求解位姿) (1.9,匹配)};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 13\quad 每帧跟踪的耗时构成（数据来自 arXiv 版附录表 8，RTX 4090，三个数据集平均）}
+\end{center}
+
+神经网络占了绝大部分时间，匹配和求解位姿加起来只有约 4 毫秒。这和 VGGT-SLAM 2.0 的情况一样：\textbf{这类系统的瓶颈在网络推理，不在 SLAM 算法。}作者在局限里也提到，以全分辨率运行解码器是目前的主要瓶颈。
+
+\isec{十、局限，以及可以做的方向}
+
+作者在第 5 节列出了三点局限。
+
+\textbf{1. 全局优化没有精化几何。}后端只优化关键帧位姿，点图本身是前端融合的结果，不参与全局优化。DROID-SLAM 用光束法平差优化每个像素的深度，但会产生不连贯的几何。作者认为，能在实时条件下让点图在三维中全局一致、同时保持 MASt3R 预测的连贯性，是一个有意思的方向。
+
+\textbf{2. 镜头畸变。}MASt3R 只在针孔相机图像上训练过，畸变越大预测越差。本文的框架本身从不假设参数化的相机模型，所以一旦将来有在各种镜头上训练的模型，可以直接接入。
+
+\textbf{3. 解码器是速度瓶颈。}尤其影响低延迟跟踪和闭环候选的验证。提高网络的吞吐量，整个系统就会变快。
+
+\keypt{\textbf{一个值得尝试的想法。}本文每次只让网络看两张图，一致性全靠系统逐帧匹配和融合来保证；VGGT 一次能看一批图，批内一致性由网络直接给出。把两者结合：用 VGGT 处理一小段连续帧得到一致的局部结果，再用本文的迭代投影匹配、加权融合和重定位机制把各段连起来，可能兼得两者的长处。}
+
+\isec{十一、与 VGGT-SLAM 2.0 的对照}
+
+\begin{center}
+\small
+\begin{tabular}{p{3.0cm}p{6.0cm}p{6.0cm}}
+\toprule
+ & MASt3R-SLAM & VGGT-SLAM 2.0\\
+\midrule
+网络一次看几张图 & 2 张 & 一批（16--32 张）\\
+一致性靠谁 & 系统逐帧匹配、融合、优化 & 批内靠网络，批间靠因子图\\
+像素匹配 & 自己设计的迭代投影匹配，约 2 ms & 不需要，重叠帧天然对应\\
+三维点 & 多次预测加权融合 & 直接使用网络输出\\
+优化变量 & 每个关键帧的 Sim(3) 位姿 & 每个关键帧的单应矩阵（SL(4)）\\
+跟丢后 & 有重定位 & 没有恢复机制\\
+已知标定时 & 可利用，TUM 误差 0.030 m & 论文未提供此模式\\
+TUM 无标定误差 & 0.060 m & 0.041 m\\
+速度（同一台 3090） & 7.2 帧/秒 & 8.4 帧/秒\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+两者是同一条技术路线上的两种走法：都用几何基础模型直接给出三维，都保留了传统的优化后端。根本区别在于网络一次看几张图，这决定了系统要承担多少工作。本文网络看得少，系统做得多，因此有了高效的匹配、融合和重定位；VGGT-SLAM 2.0 网络看得多，系统做得少，因此有了更简单的拼接方式。VGGT-SLAM 2.0 作者自己承认的两个局限（跟丢无法恢复、不修正三维点），在本文里恰好都有对应的解决办法。
+
+\isec{十二、常见疑问}
+
+\textbf{问：为什么只用两张图的 MASt3R，而不用一次看更多图的模型？}\quad 作者在引言里给出了理由：SfM 和 SLAM 本来就依靠“空间上稀疏、避免冗余”来做到大规模一致，两视图结构对应的正是 SfM 最基本的双视图几何，这种模块化让后端可以高效决策、稳健地达成一致。换句话说，作者有意把“一致性”交给系统而不是网络。
+
+\textbf{问：第 3.1 节说 MASt3R 部分训练数据有真实尺度，为什么还要估计缩放？}\quad 作者发现，尺度恰恰是不同预测之间最主要的不一致来源。网络对“这个房间有多大”的判断每次都有出入，把缩放作为未知数来估计，比直接相信网络的尺度更稳。
+
+\textbf{问：跟踪时为什么不直接把当前帧的点图对齐到关键帧，还要做匹配？}\quad 第 3.3 节讨论过这一点：用网络对两帧的联合预测做对齐，不需要显式匹配，但作者发现在基线较大时，显式匹配的精度更高。匹配只要 2 毫秒，代价很小。
+
+\textbf{问：纯旋转时为什么会出问题？}\quad 相机原地转动时，所有点都绕着相机中心转，射线方向变了，但点到相机中心的距离一点都没变。只看射线方向的误差里没有任何关于距离的信息，缩放就成了想取多少都可以的量，方程组退化。加一项权重很小的距离误差就能把缩放固定住。
+
+\textbf{问：无标定时误差 0.060 米，有标定时 0.030 米，差距来自哪里？}\quad 有标定时做了两处改动：点图只保留深度，方向由已知的相机模型给出；误差从射线换成像素。前者去掉了网络在方向上的预测误差，后者让误差与成像过程直接对应。两者合起来使误差减半，这也说明 MASt3R 对相机模型的“隐式估计”仍有明显误差。
+
+\textbf{问：为什么说它“即插即用”？}\quad 不需要标定，不需要 IMU 等其他传感器，读入一段普通视频就能运行。第 4.3 节还展示了一段相邻关键帧之间存在极端变焦的室外视频（原文图 7），系统仍能正常建图，这是假设“固定相机参数”的传统系统做不到的。
+
+\isec{十三、复现要点}
+
+代码开源在 \texttt{github.com/rmurai0610/MASt3R-SLAM}，许可证为 CC BY-NC-SA 4.0，只能用于非商业用途，研究和复现没有问题。模型权重由 Naver 公司提供，按仓库说明下载。
+
+环境方面：官方在 Ubuntu 上测试，使用 conda 建立 Python 3.11 环境，PyTorch 固定为 2.5.1，对应 CUDA 11.8、12.1 或 12.4。PyTorch 2.5.1 不支持 RTX 50 系列显卡，租用服务器时应选择 RTX 3090 或 4090；论文实验全部在 RTX 4090 上完成。WSL 用户需要切换到仓库的 windows 分支。不需要 ROS。
+
+使用很方便，可以直接读取 mp4 视频或图片文件夹，不需要标定：
+
+\begin{center}
+\texttt{python main.py --dataset 视频.mp4 --config config/base.yaml}
+\end{center}
+
+如果知道相机内参，加上 \texttt{--calib config/intrinsics.yaml} 可以提高精度；连接 RealSense 相机还能实时运行。建议和 VGGT-SLAM 2.0 用同一段手机视频各跑一遍，对比两者的轨迹和重建效果，重点看它们各自在什么场景下出问题。
+
+\end{interp}
