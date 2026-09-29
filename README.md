@@ -1,4 +1,4 @@
-# bilingual-paper-print
+# paper-decoder · 论文翻译解读
 
 一个 Claude Code skill：把 arXiv 论文做成可以直接打印的中英双语精读版 PDF。
 
@@ -15,7 +15,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/Jonty-Zhang/bilingual-paper-print ~/.claude/skills/bilingual-paper-print
+git clone https://github.com/Jonty-Zhang/paper-decoder ~/.claude/skills/paper-decoder
 ```
 
 装好后在 Claude Code 里直接说，例如：“把 arXiv 2412.12392 这篇论文做成打印版”。
@@ -54,7 +54,7 @@ git clone https://github.com/Jonty-Zhang/bilingual-paper-print ~/.claude/skills/
 ## 流程概览
 
 ```bash
-K=~/.claude/skills/bilingual-paper-print
+K=~/.claude/skills/paper-decoder
 python3 $K/scripts/extract.py <name>                      # 需要 <name>.html
 # 翻译：写 <name>_zh.txt
 python3 $K/scripts/tables.py <name>                        # 然后填 <name>_tables_zh.txt
