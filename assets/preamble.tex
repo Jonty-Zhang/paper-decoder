@@ -1,0 +1,69 @@
+\documentclass[10pt]{article}
+\usepackage[a4paper,top=14mm,bottom=16mm,left=13mm,right=13mm]{geometry}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{graphicx,amsmath,amssymb,bm,xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,fit,backgrounds}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{booktabs,array,multicol,needspace,multirow}\setlength{\columnsep}{12pt}
+\setmainfont{Times New Roman}
+\setCJKmainfont{Songti SC}[BoldFont={Songti SC Bold}]
+\setCJKsansfont{Heiti SC}
+\xeCJKsetup{CJKecglue={\hskip 0.15em plus 0.05em}}
+\newcommand{\Exp}{\operatorname{Exp}}
+\setlength{\parindent}{0pt}
+% 整页讲解顶端对齐（LaTeX 默认把单独成页的浮动内容垂直居中）
+\makeatletter\setlength{\@fptop}{0pt}\setlength{\@fpsep}{8pt}\setlength{\@fpbot}{0pt plus 1fil}\makeatother
+% pgfplots 数字一律用普通小数，不用科学计数法、不加千位分隔
+\pgfkeys{/pgf/number format/.cd,fixed,precision=3,1000 sep={}}
+\pgfplotsset{scaled ticks=false}
+% 误差类图表的柱顶数字统一保留三位小数（0.030 而不是 0.03）
+\pgfplotsset{ate labels/.style={nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=3]{\pgfplotspointmeta}}}}
+\newlength{\colw}\setlength{\colw}{\dimexpr0.5\textwidth-6pt\relax}
+\newcommand{\zhcol}{\fontsize{9.3}{14}\selectfont\setlength{\parindent}{0pt}\setlength{\parskip}{0pt}}
+\newcommand{\notefont}{\fontsize{8.4}{12.6}\selectfont}
+% ---- 概念注释框：浅灰底深色框，黑白打印也能分辨 ----
+\newcommand{\concept}[2]{{\sffamily\bfseries #1}\enspace #2\par\vspace{2.5pt}}
+\newcommand{\notebox}[1]{\par\noindent\setlength{\fboxsep}{4.5pt}\setlength{\fboxrule}{0.6pt}%
+  \fcolorbox{black!60}{black!5}{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}{\notefont
+  {\sffamily\bfseries\small 概念注释}\par\vspace{3pt}#1}}\par}
+% ---- 整页讲解 ----
+\newenvironment{fullnote}[1]{\noindent\begin{minipage}{\textwidth}\setlength{\fboxsep}{0pt}%
+  \colorbox{black!80}{\parbox{\textwidth}{\vspace{5pt}\hspace{8pt}{\color{white}\sffamily\bfseries\large 延伸讲解\quad #1}\vspace{5pt}}}\par\vspace{8pt}%
+  \fontsize{9.6}{15.5}\selectfont\setlength{\parskip}{4pt}}{\end{minipage}}
+% ---- 行：左原文切片，右译文；注释放得进右栏空白就放右栏，否则跨页宽放在行后 ----
+\newsavebox\bimg \newsavebox\bzh \newsavebox\bnote
+\newcommand{\bilrow}[3]{%
+  \sbox\bimg{#1}%
+  \sbox\bzh{\begin{minipage}[t]{\colw}\vspace{0pt}\zhcol #2\end{minipage}}%
+  \def\tmpnote{#3}%
+  \ifx\tmpnote\empty
+    \par\noindent\begin{minipage}[t]{\colw}\vspace{0pt}\usebox\bimg\end{minipage}\hfill{\color{black!25}\vrule width 0.4pt}\hfill\usebox\bzh\par\vspace{5pt}%
+  \else
+    \sbox\bnote{\begin{minipage}[t]{\colw}\vspace{0pt}#3\end{minipage}}%
+    \ifdim\dimexpr\ht\bzh+\dp\bzh+\ht\bnote+\dp\bnote+6pt\relax<\dimexpr\ht\bimg+\dp\bimg\relax
+      \par\noindent\begin{minipage}[t]{\colw}\vspace{0pt}\usebox\bimg\end{minipage}\hfill{\color{black!25}\vrule width 0.4pt}\hfill
+      \begin{minipage}[t]{\colw}\vspace{0pt}\usebox\bzh\par\vspace{6pt}\usebox\bnote\end{minipage}\par\vspace{5pt}%
+    \else
+      \par\noindent\begin{minipage}[t]{\colw}\vspace{0pt}\usebox\bimg\end{minipage}\hfill{\color{black!25}\vrule width 0.4pt}\hfill\usebox\bzh\par\vspace{4pt}%
+      \noindent\begin{minipage}{\textwidth}#3\end{minipage}\par\vspace{6pt}%
+    \fi
+  \fi}
+\newcommand{\fullband}[3]{\par\noindent#1\par\vspace{3pt}%
+  \noindent\begin{minipage}{\textwidth}\zhcol #2\end{minipage}\par\vspace{3pt}%
+  \def\tmpnote{#3}\ifx\tmpnote\empty\else\noindent\begin{minipage}{\textwidth}#3\end{minipage}\par\fi\vspace{8pt}}
+\newcommand{\origonly}[1]{\par\noindent#1\par\vspace{6pt}}
+% ---- 表格译文：8pt 字号，居中；比所在栏宽时整体缩到栏宽 ----
+\newsavebox\bztab
+\newcommand{\zhtable}[1]{\par\vspace{2pt}\sbox\bztab{\fontsize{8}{10}\selectfont\setlength{\tabcolsep}{3.5pt}#1}%
+  {\centering\ifdim\wd\bztab>\linewidth\resizebox{\linewidth}{!}{\usebox\bztab}\else\usebox\bztab\fi\par}\vspace{5pt}}
+% ---- 文末解读的版式 ----
+\newenvironment{interp}[1]{\clearpage{\centering\sffamily\bfseries\fontsize{20}{26}\selectfont #1\par}\vspace{14pt}%
+  \fontsize{10.3}{17.5}\selectfont\setlength{\parindent}{2em}\setlength{\parskip}{2pt}}{}
+\newcommand{\isec}[1]{\par\vspace{12pt}\noindent{\sffamily\bfseries\Large #1}\par\vspace{6pt}}
+\newcommand{\isub}[1]{\par\vspace{7pt}\noindent{\sffamily\bfseries\large #1}\par\vspace{3pt}}
+\newcommand{\tucap}[1]{\par\vspace{2pt}{\centering\small #1\par}\vspace{8pt}}
+\newcommand{\keypt}[1]{\par\vspace{4pt}\noindent\setlength{\fboxsep}{6pt}\fcolorbox{black!70}{black!4}{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}{\setlength{\parindent}{0pt}#1}}\par\vspace{6pt}}
+\begin{document}
