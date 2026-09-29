@@ -1,0 +1,468 @@
+\begin{interp}{论文解读}
+
+\isec{一、这篇论文在解决什么问题}
+
+这篇论文要做的事情可以用一句话概括：\textbf{只用一个普通摄像头，不事先测量相机参数，一边拍一边建出稠密的彩色三维地图，同时算出相机走过的轨迹。}
+
+它依赖的核心工具是 Meta 发布的 VGGT。VGGT 能从一批没有标定过的照片里直接算出三维结构，但有一个硬限制：在 24 GB 显存的 RTX 4090 上，一次最多只能处理大约 60 张图。而一段几分钟的视频，挑出的关键帧就有成百上千张。所以整篇论文实际上在回答一个工程问题：\textbf{怎样把 VGGT 一段一段算出来的局部结果，拼成一张全局一致的大地图。}
+
+\begin{center}
+\begin{tikzpicture}[font=\small,
+  fr/.style={draw,minimum width=0.62cm,minimum height=0.48cm,inner sep=0pt},
+  ov/.style={fr,fill=black!30}]
+\foreach \i in {0,...,4} \node[fr] (a\i) at (\i*0.7,0) {};
+\node[ov] (a4) at (4*0.7,0) {};
+\foreach \i in {1,...,4} \node[fr] (b\i) at (4*0.7+\i*0.7,0) {};
+\node[ov] (b4) at (8*0.7,0) {};
+\foreach \i in {1,...,4} \node[fr] (c\i) at (8*0.7+\i*0.7,0) {};
+\draw[decorate,decoration={brace,amplitude=5pt}] (-0.3,0.4) -- (3.05,0.4) node[midway,above=5pt] {子图 1};
+\draw[decorate,decoration={brace,amplitude=5pt}] (2.55,0.75) -- (5.85,0.75) node[midway,above=5pt] {子图 2};
+\draw[decorate,decoration={brace,amplitude=5pt}] (5.35,0.4) -- (8.65,0.4) node[midway,above=5pt] {子图 3};
+\node[below=0.35cm of a4,align=center,font=\footnotesize] (lab) {灰色为重叠帧：\\前一段的最后一张 = 后一段的第一张};
+\draw[-{Stealth}] (lab.north) -- (a4.south);
+\node[draw,thick,minimum width=2cm,minimum height=0.9cm] (v) at (11.6,0) {VGGT 分段重建};
+\draw[-{Stealth},thick] (9.0,0) -- (v.west);
+\node[draw,thick,minimum width=2.2cm,minimum height=0.9cm,align=center] (g) at (14.8,0) {因子图拼接\\+ 闭环};
+\draw[-{Stealth},thick] (v.east) -- (g.west);
+\end{tikzpicture}
+\tucap{图 1\quad 整体思路：把视频切成相互重叠的子图，逐段交给 VGGT 重建，再拼成一张全局地图}
+\end{center}
+
+作者对 VGGT 本身一个参数都没有训练，所有贡献都在“怎么拼”上。这带来一个很实际的好处，作者在结论里特意强调：将来 VGGT 出了更快或更准的版本，可以直接替换进来，系统自动变好。
+
+\isec{二、逐节导读：原文每一节在讲什么}
+
+原文正文一共 10 页。各节的分量很不均匀：真正的方法集中在第 III、IV 节，大约 2 页半；实验占了 4 页多，但大部分是结果展示。下面这张表可以当作读原文时的地图，“难度”一栏说明该节需要花多少力气。
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{>{\raggedright\arraybackslash}p{2.9cm}>{\raggedright\arraybackslash}p{6.3cm}>{\raggedright\arraybackslash}p{6.2cm}c}
+\toprule
+原文章节 & 这一节讲什么 & 读的时候抓住什么 & 难度\\
+\midrule
+摘要、图 1 & 三项贡献：新因子图、注意力闭环验证、开放集检测与机器人实时运行 & 先把三项贡献记住，后面每一节都在展开其中一项 & 低\\
+I\enspace 引言 & 1.0 的三个毛病：15 自由度漂移、平面退化、闭环误判 & 作者怎样从问题一步步引出方法 & 低\\
+II\enspace 相关工作 & 经典建图、前馈重建、注意力层分析三条线 & 可以跳读；想延伸时从 [2][3][4][5][8] 找起 & 低\\
+III\enspace 符号与预备知识 & 式 (1)(2)(3)，15 个自由度，SL(4) 流形 & 全文最抽象的一节，配合正文中插入的延伸讲解“单应矩阵、15 个自由度与 SL(4)”和本解读第七节 & 高\\
+IV-A\enspace 相对帧对齐 & 子图内边、子图间边、用中位数求缩放 & 核心贡献一，逐句读 & 高\\
+IV-B\enspace 检索验证 & 第 22 层注意力，式 (5)(6) & 核心贡献二，配合延伸讲解“注意力机制” & 高\\
+IV-C\enspace 闭环与全局优化 & 两帧闭环子图，GTSAM，式 (7) 恢复位姿 & 注意“闭环帧不塞进当前子图，而是单独成子图” & 中\\
+V-A～C\enspace 实验 & 表 I 精度，表 II、III 闭环验证 & 比较是否在同一赛道；平面序列的数字 & 中\\
+V-D～F\enspace 应用与耗时 & 开放集检测，谷仓与 KITTI，耗时，Jetson 实机 & 快速浏览，重点看表 IV 时间花在哪 & 低\\
+VI\enspace 局限 & 白墙失败、只优化位姿、第一帧影响过大 & 每一条都是可以接着做的题目 & 中\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+建议的阅读顺序是：摘要 → 图 3（因子图）→ 第 IV-A 节 → 图 4、图 5（注意力）→ 第 IV-B 节 → 表 I、表 II → 第 VI 节，最后再回头补第 III 节的数学。先弄懂“它做了什么”，再去啃“为什么这样表示”，比从头硬读顺畅得多。
+
+\isec{三、背景：VGGT 能做什么}
+
+VGGT 属于“几何基础模型”。这类模型在大量带三维真值的数据上预训练过，输入普通照片，直接输出几何量，不需要传统 SLAM 里“提特征、匹配、三角化”那一整套流程。VGGT 对输入的每一张图给出四样东西：
+
+\begin{center}
+\begin{tikzpicture}[font=\small,box/.style={draw,thick,minimum height=0.8cm,align=center}]
+\foreach \i in {0,1,2} \draw[fill=black!8] (\i*0.25,\i*0.25) rectangle ++(1.6,1.1);
+\node[align=center] at (1.05,-0.45) {一批未标定的照片};
+\node[box,minimum width=3.2cm] (v) at (5.2,0.55) {VGGT\\\footnotesize 多层 Transformer};
+\draw[-{Stealth},thick] (2.3,0.55) -- (v.west);
+\node[box,minimum width=3.4cm,anchor=west] (o1) at (8.2,1.65) {内参 $\mathbf{K}$：焦距、图像中心};
+\node[box,minimum width=3.4cm,anchor=west] (o2) at (8.2,0.9) {位姿 $\mathbf{T}$：相机在哪、朝哪};
+\node[box,minimum width=3.4cm,anchor=west] (o3) at (8.2,0.15) {深度图 $\mathbf{D}$：每个像素多远};
+\node[box,minimum width=3.4cm,anchor=west] (o4) at (8.2,-0.6) {置信度 $\mathbf{C}$：有多大把握};
+\foreach \k in {1,...,4} \draw[-{Stealth}] (v.east) -- (o\k.west);
+\end{tikzpicture}
+\tucap{图 2\quad VGGT 的输入与输出。有了内参和深度，就能把每个像素反投影成三维点}
+\end{center}
+
+同一批图里的结果是\textbf{自洽}的：它们处在同一个坐标系里，彼此对得上。问题出在\textbf{不同批次之间}：每一批都以自己的第一张图为参考，尺度各不相同；更麻烦的是，由于内参是网络猜出来的，每一批可能带着各自不同的拉伸和透视变形。
+
+\isec{四、前作 VGGT-SLAM 1.0 的问题}
+
+\isub{1. 它用最“宽松”的方式对齐子图}
+
+1.0 发现，仅用相似变换（旋转、平移、缩放，共 7 个自由度）对齐两段子图不够，因为子图之间还存在内参误差造成的变形。于是它改用完整的 $4\times4$ 单应矩阵，在全部 15 个自由度里寻找最佳对齐。正文第 III 节后插入的整页讲解详细说明了这 15 个自由度分别是什么。
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[xbar stacked, width=12.5cm, height=4.2cm, bar width=12pt,
+  xmin=0, xmax=16, xlabel={需要估计的自由度个数}, symbolic y coords={2.0 子图间边,2.0 子图内边,1.0 子图间边},
+  ytick=data, y tick label style={font=\small}, legend style={at={(0.5,1.03)},anchor=south,legend columns=5,font=\footnotesize},
+  every axis plot/.append style={draw=black}]
+\addplot[fill=black!85] coordinates {(0,2.0 子图间边) (3,2.0 子图内边) (3,1.0 子图间边)};
+\addplot[fill=black!60] coordinates {(0,2.0 子图间边) (3,2.0 子图内边) (3,1.0 子图间边)};
+\addplot[fill=black!40] coordinates {(1,2.0 子图间边) (0,2.0 子图内边) (1,1.0 子图间边)};
+\addplot[fill=black!20] coordinates {(5,2.0 子图间边) (0,2.0 子图内边) (5,1.0 子图间边)};
+\addplot[fill=white] coordinates {(0,2.0 子图间边) (0,2.0 子图内边) (3,1.0 子图间边)};
+\legend{平移,旋转,缩放,内参,透视}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 3\quad 每条边需要估计的自由度。1.0 在子图之间估计全部 15 个；2.0 把它拆成两种各只有 6 个的边}
+\end{center}
+
+\isub{2. 自由度太多带来两个后果}
+
+\textbf{第一，漂移快。}可调的量越多，观测对它们的约束就越弱。两段子图的重叠部分只有一张图，要用这点信息确定 15 个参数，每次拼接都会留下一些没被约束住的误差，这些误差一段一段累积下去，地图在闭环之前就已经严重变形（原文图 2 左）。
+
+\textbf{第二，平面退化。}当相机对着一面墙或一块地板时，重叠帧里的点几乎都在同一个平面上。这时有一类变换无法确定：它保持平面上的点不动，却能把平面以外的空间任意倾斜。
+
+\begin{center}
+\begin{tikzpicture}[scale=0.9,font=\small]
+\begin{scope}
+\foreach \x in {0,0.8,...,4} \draw[gray] (\x,0) -- (\x,2.2);
+\draw[very thick] (-0.3,0) -- (4.3,0);
+\foreach \x in {0.2,0.6,...,3.8} \fill (\x,0) circle (1.6pt);
+\node at (2,-0.55) {变换 A：平面外保持竖直};
+\end{scope}
+\begin{scope}[xshift=7cm]
+\foreach \x in {0,0.8,...,4} \draw[gray] (\x,0) -- (\x+1.1,2.2);
+\draw[very thick] (-0.3,0) -- (4.3,0);
+\foreach \x in {0.2,0.6,...,3.8} \fill (\x,0) circle (1.6pt);
+\node at (2,-0.55) {变换 B：平面外被整体倾斜};
+\end{scope}
+\end{tikzpicture}
+\tucap{图 4\quad 平面退化：黑点（平面上的观测）在两种变换下完全一致，平面以外的空间却完全不同，观测无法区分 A 和 B}
+\end{center}
+
+观测数据只落在平面上，求解器无从判断哪种变换是对的，数值上就会发散。这正是 1.0 在 KITTI 数据集上失败的原因之一：车载相机拍到的点大多在平坦的路面上。
+
+\isub{3. 另外两个不足}
+
+1.0 的因子图只估计“子图对子图”的变换，VGGT 对单个关键帧位置估计的误差修不掉；闭环完全依赖检索网络 SALAD，遇到外观相似的地方（比如一排一样的办公格子间）会认错，而一次认错就可能毁掉整张地图。
+
+\isec{五、改进一：把“估计”换成“规定”}
+
+\isub{1. 核心观察}
+
+重叠帧是\textbf{同一张照片}，在前后两段子图里各被 VGGT 处理了一次。它的拍摄位置、朝向和相机参数是客观存在的唯一值，两段子图的结果本应完全一样。两边算出来不一样，全部来自 VGGT 的误差。既然如此，就没有必要“估计”两边的相对位置，直接\textbf{规定}相对平移、相对旋转为零，内参必须相同，只剩缩放比例需要求。
+
+这里有一个很值得体会的细节：VGGT 估计的内参可能两边都是错的，2.0 并不追求求出“真实内参”（这做不到），只要求两边\textbf{彼此一致}。放弃追求绝对正确、转而保证内部一致，是这个设计能成立的关键。
+
+\Needspace{16\baselineskip}\isub{2. 新的因子图}
+
+\begin{center}
+\begin{tikzpicture}[font=\small,
+  n/.style={circle,draw,thick,minimum size=0.75cm,inner sep=0pt},
+  intra/.style={thick}, inter/.style={thick,double,double distance=1.4pt}]
+\node[n] (h1) at (0,0) {$H_1$}; \node[n] (h2) at (1.6,0) {$H_2$}; \node[n] (h3) at (3.2,0) {$H_3$};
+\node[n] (h4) at (4.8,0) {$H_4$}; \node[n] (h5) at (6.4,0) {$H_5$}; \node[n] (h6) at (8.0,0) {$H_6$};
+\node[n] (h7) at (9.6,0) {$H_7$}; \node[n] (h8) at (11.2,0) {$H_8$}; \node[n] (h9) at (12.8,0) {$H_9$};
+\draw[intra] (h1)--(h2)--(h3); \draw[intra] (h4)--(h5)--(h6); \draw[intra] (h7)--(h8)--(h9);
+\draw[intra] (h1) to[bend left=35] (h3); \draw[intra] (h4) to[bend left=35] (h6); \draw[intra] (h7) to[bend left=35] (h9);
+\draw[inter] (h3)--(h4); \draw[inter] (h6)--(h7);
+\node[n,fill=black!12] (l1) at (3.6,-2.3) {$L_1$}; \node[n,fill=black!12] (l2) at (9.2,-2.3) {$L_2$};
+\draw[intra] (l1) -- (l2);
+\draw[inter] (h2) -- (l1); \draw[inter] (h8) -- (l2);
+\begin{scope}[on background layer]
+\node[draw,dashed,rounded corners,fit=(h1)(h3),inner sep=6pt,label=above:子图 1] {};
+\node[draw,dashed,rounded corners,fit=(h4)(h6),inner sep=6pt,label=above:子图 2] {};
+\node[draw,dashed,rounded corners,fit=(h7)(h9),inner sep=6pt,label=above:子图 3] {};
+\node[draw,dashed,rounded corners,fit=(l1)(l2),inner sep=6pt,label=below:闭环子图（只有 2 帧）] {};
+\end{scope}
+\draw[intra] (0.2,-3.9) -- (1.2,-3.9) node[right] {子图内边：只含旋转、平移};
+\draw[inter] (7.0,-3.9) -- (8.0,-3.9) node[right] {子图间边：只含内参、缩放};
+\end{tikzpicture}
+\tucap{图 5\quad 2.0 的因子图。$H_3$ 与 $H_4$ 是同一张重叠帧在两段子图里的两个节点；$L_1$、$L_2$ 组成闭环子图}
+\end{center}
+
+两种边的分工很清楚。\textbf{子图内边}连接同一段子图里的关键帧。同一段是 VGGT 一次算出来的，内部的变形是一致的，所以这些边只需要旋转和平移，直接取 VGGT 给出的相对位姿 $\mathbf{T}_i^{-1}\mathbf{T}_j$，作用是修正 VGGT 对单帧位置的误差。\textbf{子图间边}连接重叠帧的两个节点，旋转平移强制为零，只允许调整内参和缩放，把式 (4) 写出来就是
+\[ \mathbf{H}^{i}_{j}=\begin{bmatrix}\mathbf{K}_i^{-1}\mathbf{K}_j & \mathbf{0}\\ \mathbf{0}^{\top} & s\end{bmatrix}. \]
+没有任何一条边需要同时处理 15 个自由度，漂移和平面退化随之消失。
+
+\isub{3. 缩放比例怎么求：中位数}
+
+重叠帧是同一张图，两边的像素\textbf{天然一一对应}，不需要做特征匹配。先把两边的点云换算到同一套内参下，对每一对对应点计算“到相机的距离之比”，然后取所有比值的\textbf{中位数}作为缩放比例 $s$。
+
+用中位数而不用平均值，是因为 VGGT 的深度偶尔会错得离谱。看一个假设的例子：真实比例是 2.0，十个点的比值里有两个是错的。
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, width=12.5cm, height=4.6cm, bar width=14pt, ymin=0, ymax=6.8, xmin=0.4, xmax=10.6,
+  xtick={1,...,10}, xlabel={对应点编号}, ylabel={距离之比}, ylabel style={font=\small},
+  clip=false, every axis plot/.append style={draw=black}]
+\addplot[fill=black!25] coordinates {(1,2.01)(2,1.98)(3,2.03)(4,5.70)(5,2.00)(6,1.97)(7,2.02)(8,6.30)(9,1.99)(10,2.04)};
+\draw[thick,dashed] (axis cs:0.4,3.00) -- (axis cs:10.6,3.00) node[right,font=\small] {平均值 3.00};
+\draw[very thick] (axis cs:0.4,2.015) -- (axis cs:10.6,2.015) node[right,font=\small] {中位数 2.015};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 6\quad 两个错误的深度（4 号、8 号）把平均值拉到 3.00，中位数几乎不受影响。论文只用置信度足够高的点计算}
+\end{center}
+
+\isec{六、改进二：从 VGGT 内部“白捡”一个闭环验证器}
+
+\isub{1. 问题}
+
+闭环候选由检索网络 SALAD 给出。SALAD 只比较两张图“整体看起来像不像”，外观相似的不同地方会被判成同一处。1.0 的对策是把阈值收紧到 0.80，宁可少找闭环也不误判，结果在 Clio 公寓场景里一个闭环都没找到，在办公室场景里仍然误判，地图直接崩溃。
+
+\isub{2. 做法}
+
+作者把 VGGT 各层的注意力画出来逐层观察，发现第 22 层有一个稳定的现象：两张图拍到同一个地方时，图 1 某个位置的注意力会像聚光灯一样集中到图 2 的对应位置；不重叠时注意力是散的。据此设计了匹配分数（式 5、6，正文第 IV-B 节后的整页讲解有逐步说明），超过 0.85 才认定为真闭环。
+
+\begin{center}
+\begin{tikzpicture}[font=\small]
+\draw[thick,-{Stealth}] (0,0) -- (13,0) node[right] {$\alpha_{\text{match}}$};
+\foreach \x/\l in {0/0.4,2.4/0.6,4.8/0.8,7.2/1.0,9.6/1.2} \draw (\x+0.6,0.1) -- (\x+0.6,-0.1) node[below] {\l};
+\fill[black!10] (6.0,0.2) rectangle (13,0.9);
+\draw[very thick] (6.0,-0.3) -- (6.0,1.3) node[above] {阈值 0.85};
+\node at (9.5,0.55) {判为真闭环};
+\fill (1.692,0) circle (3pt) node[above=4pt,align=center] {0.491\\不重叠};
+\fill (2.4,0) circle (3pt) node[below=12pt,align=center] {0.550\\相似格子间\\（SALAD 误判）};
+\fill (7.512,0) circle (3pt) node[below=12pt,align=center] {1.026\\确实重叠};
+\end{tikzpicture}
+\tucap{图 7\quad 原文图 5 中三个例子的匹配分数。被 SALAD 误判的格子间只得到 0.550，被正确拒绝}
+\end{center}
+
+\isub{3. 为什么说是“白捡”}
+
+判断闭环时，VGGT 本来就要处理这两张图，注意力矩阵是计算过程的副产品，读出来不需要额外训练，也几乎不增加计算量。有了这道保险，SALAD 的阈值可以从 0.80 放宽到 0.95，捞到更多候选，再由注意力把错的剔除。
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, area legend, width=11cm, height=4.8cm, bar width=18pt, ymin=0, ymax=11,
+  symbolic x coords={格子间,公寓,办公室}, xtick=data, ylabel={找到的闭环数},
+  legend style={at={(0.02,0.97)},anchor=north west,font=\footnotesize}, nodes near coords, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge x limits=0.25]
+\addplot[fill=black!20] coordinates {(格子间,2) (公寓,0)};
+\addplot[fill=black!70] coordinates {(格子间,5) (公寓,9) (办公室,4)};
+\legend{不验证（阈值 0.80）,验证（阈值 0.95）}
+\node[font=\footnotesize,align=center,anchor=south,xshift=-10pt] at (axis cs:办公室,0) {误判\\崩溃};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 8\quad Clio 数据集上的闭环数量（原文表 II）。不验证时办公室场景出现误判闭环，地图发散，没有可比的数字；验证后三个场景都没有误判}
+\end{center}
+
+在另一个数据集 LaMAR 上，把这个验证器接在 SALAD 和 NetVLAD 两种检索方法后面，Recall@1 分别从 88.45 提高到 90.13、从 85.92 提高到 89.08。它不挑检索方法，这一点说明它可以作为一个通用模块使用。
+
+\isec{七、把公式逐个读懂}
+
+原文一共 7 个编号公式，另有一个写在第 III 节正文里、没有编号的反投影公式。下面按“它在算什么—代入一个数试试—为什么要这样写”的顺序逐个过一遍。
+
+\isub{1. 反投影：像素怎么变成三维点}
+
+第 III 节写道，第 $i$ 帧的三维点 $\mathbf{X}_i$ 由 $\mathbf{K}_i^{-1}$ 和 $\mathbf{D}_i$ 反投影得到，意思是：拿到第 $i$ 张图每个像素的深度，用内参的逆矩阵把它“反投影”回相机前方的三维空间。对单个像素 $(u,v)$，深度为 $d$，展开就是
+\[ \mathbf{X}=d\,\mathbf{K}^{-1}\begin{bmatrix}u\\ v\\ 1\end{bmatrix},\qquad
+\mathbf{K}=\begin{bmatrix}f&0&c_x\\ 0&f&c_y\\ 0&0&1\end{bmatrix}. \]
+代入一个数：焦距 $f=500$，图像中心 $(c_x,c_y)=(320,240)$，像素 $(420,240)$ 的深度 $d=2$ 米，则 $\mathbf{K}^{-1}[u,v,1]^\top=\big(\tfrac{420-320}{500},0,1\big)=(0.2,0,1)$，三维点就是 $(0.4,0,2)$：在相机正前方 2 米、向右偏 0.4 米的位置。
+
+\begin{center}
+\begin{tikzpicture}[font=\small,scale=1.05]
+\fill (0,0) circle (2pt) node[below left] {相机中心};
+\draw[thick] (2,-1.2) -- (2,1.6) node[above] {成像平面（距中心 $f$）};
+\draw[-{Stealth},thick] (0,0) -- (8.2,0) node[right] {光轴};
+\draw[dashed] (0,0) -- (8,1.6);
+\draw[thick,dotted] (0,0) -- (8,2.0);
+\fill (2,0.4) circle (2pt) node[left=2pt,font=\footnotesize] {像素 (420, 240)};
+\fill (8,1.6) circle (2.4pt) node[right] {$(0.4,0,2)$：$f=500$ 时};
+\fill[white,draw=black] (8,2.0) circle (2.4pt) node[right] {$(0.5,0,2)$：误把 $f$ 估成 400 时};
+\draw[|-|] (8,-0.45) -- node[below] {深度 $d=2$ 米} (0,-0.45);
+\end{tikzpicture}
+\tucap{图 9\quad 反投影：同一个像素、同一个深度，焦距估错了，三维点就会被推开，整片点云随之被拉伸}
+\end{center}
+
+图中空心点说明了内参估错的后果：焦距估小了 20\%，点就往外偏了 25\%。整张图的每个点都这样偏，点云被均匀拉宽。这正是“不同子图带着不同变形”的来源，也是 1.0 要用 15 个自由度去对齐的原因。
+
+\isub{2. 式 (1)(2)：单应矩阵和它的 15 个自由度}
+
+式 (1) $\mathbf{X}_i^a=\mathbf{H}^i_j\mathbf{X}_j^b$ 说：两套点之间差一个 $4\times4$ 矩阵。式 (2) 把这个矩阵拆成四块：左上 $\mathbf{KR}$ 负责旋转和内参变形，右上 $\mathbf{t}$ 是平移，右下 $s$ 是缩放，左下 $\mathbf{v}^\top$ 是透视分量。数一下：旋转 3、平移 3、缩放 1、内参 5、透视 3，共 15 个。$4\times4$ 矩阵本有 16 个数，但整体乘一个常数不改变它代表的变换，所以少一个，这也是要求行列式为 1（即 SL(4)）的原因。
+
+\isub{3. 式 (3)(4)：两种边}
+
+式 (3) 是子图内边，$\mathbf{H}^i_j=\mathbf{T}_i^{-1}\mathbf{T}_j$ 就是两帧位姿的相对变换，VGGT 直接给出，不用求。式 (4) 是子图间边
+\[ \mathbf{H}^i_j=\begin{bmatrix}\mathbf{K}_i^{-1}\mathbf{K}_j&\mathbf{0}\\ \mathbf{0}^\top&s\end{bmatrix} \]
+里，$\mathbf{K}_i^{-1}\mathbf{K}_j$ 的作用是“把用内参 $\mathbf{K}_j$ 反投影出来的点，换算成用 $\mathbf{K}_i$ 反投影的样子”。回到图 9 的例子：一边 $f=500$，另一边 $f=400$，这个矩阵就把 $(0.5,0,2)$ 压回 $(0.4,0,2)$。两边的变形因此统一，剩下唯一未知的是缩放 $s$，由第五节的中位数求出。
+
+\isub{4. 式 (5)(6)：注意力匹配分数}
+
+先说清楚 query（查询）和 key（键）。Transformer 的每个图像小块（token）都有一个 query 和一个 key。query 相当于“我在找什么”，key 相当于“我是什么”。某个 query 和某个 key 越像，注意力分数越高。
+
+式 (5) 对图 1 的每一个 key 算一个比值 $\gamma_t$：分子是“图 2 所有 query 里，最关注这个 key 的那一个有多关注它”，分母是“图 1 自己的 query 里，最关注它的那一个有多关注它”。如果图 2 里确实拍到了这块内容，图 2 中总有一个 token 会像图 1 自己一样强烈地关注它，比值接近甚至超过 1；如果没拍到，比值就小。式 (6) 再取所有 $\gamma_t$ 中最高 25\% 的平均值，得到 $\alpha_{\text{match}}$。
+
+为什么只取最高的 25\%？看一个假设的例子，图 1 有 8 个 key：
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, area legend, width=15cm, height=5cm, bar width=9pt, ymin=0, ymax=1.3,
+  symbolic x coords={k1,k2,k3,k4,k5,k6,k7,k8}, xtick=data, xlabel={图 1 的 key（按 $\gamma$ 从大到小排列）},
+  ylabel={$\gamma_t$}, legend style={at={(0.99,0.97)},anchor=north east,font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge x limits=0.08, clip=false]
+\addplot[fill=black!70] coordinates {(k1,1.10)(k2,1.05)(k3,0.98)(k4,0.95)(k5,0.40)(k6,0.35)(k7,0.30)(k8,0.20)};
+\addplot[fill=white] coordinates {(k1,0.52)(k2,0.48)(k3,0.45)(k4,0.40)(k5,0.38)(k6,0.33)(k7,0.30)(k8,0.25)};
+\legend{两图部分重叠,两图不重叠}
+\draw[very thick] ([xshift=-22pt]axis cs:k1,0.85) -- ([xshift=22pt]axis cs:k8,0.85) node[right,font=\small] {阈值 0.85};
+\draw[decorate,decoration={brace,amplitude=4pt}] ([xshift=-12pt]axis cs:k1,1.2) -- ([xshift=12pt]axis cs:k2,1.2) node[midway,above=4pt,font=\footnotesize] {最高 25\%};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 10\quad 两种情况的 $\gamma_t$。部分重叠时只有前一半 key 在图 2 里找得到对应}
+\end{center}
+
+部分重叠的情况下，前四个 key 在图 2 里拍到了，后四个没拍到。取最高 25\%（前两个）的平均得 1.075，超过阈值，判为匹配；如果改取全部 8 个的平均，只有 0.666，会被错判为不匹配。不重叠的情况下，最高 25\% 的平均是 0.50，依然被拒绝。真实场景里两张图通常只有一部分重叠，只看“最像的那一部分”正是为了不冤枉这种情况。
+
+\isub{5. 式 (7)：拼完之后怎么拿到位姿}
+
+因子图优化完成后，每个关键帧 $i$ 都有一个把它变到全局坐标系的单应矩阵 $\mathbf{H}^w_i$。式 (7) $\mathbf{P}_i=\mathbf{K}_i^{3\times4}(\mathbf{H}^w_i)^{-1}$ 把它和 VGGT 给的内参乘起来，得到一个 $3\times4$ 的投影矩阵：输入全局坐标系里的一个点，输出它在第 $i$ 张图上的像素位置。再把这个投影矩阵分解成“内参 $\times$ 位姿”，就得到最终的相机轨迹。由于 2.0 的三维点是相对每一帧自己的相机定义的，这一步只需乘一个矩阵，比 1.0 少乘一次 VGGT 给出的位姿。
+
+\Needspace{20\baselineskip}\isec{八、实验结果怎么读}
+
+\isub{1. 精度：TUM RGB-D}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[xbar, width=12cm, height=6.4cm, bar width=9pt, xmin=0, xmax=0.18,
+  xlabel={平均绝对轨迹误差 ATE（米），越短越好},
+  symbolic y coords={MASt3R-SLAM（已标定）,VGGT-SLAM 2.0,ViSTA-SLAM,VGGT-SLAM SL(4),MASt3R-SLAM,VGGT-SLAM Sim(3),DROID-SLAM},
+  ytick=data, y tick label style={font=\small}, x tick label style={/pgf/number format/precision=2},
+  nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=3]{\pgfplotspointmeta}}, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge y limits=0.1]
+\addplot[fill=black!25] coordinates {(0.158,DROID-SLAM) (0.074,{VGGT-SLAM Sim(3)}) (0.060,MASt3R-SLAM) (0.053,{VGGT-SLAM SL(4)}) (0.052,ViSTA-SLAM) (0.041,VGGT-SLAM 2.0) (0.030,MASt3R-SLAM（已标定）)};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 11\quad TUM RGB-D 上的平均误差（原文表 I）。除最下一行外均为不知道相机参数的“未标定”设定}
+\end{center}
+
+读这张表要注意三件事。
+
+\textbf{第一，比较要在同一赛道里。}知道相机参数的“已标定”方法和不知道的“未标定”方法难度不同。VGGT-SLAM 2.0 是未标定方法中最好的（0.041 m），但仍不如已标定的 MASt3R-SLAM（0.030 m）。这不是它的缺点，而是比赛条件不同。
+
+\textbf{第二，ORB-SLAM3 的数字很有意思。}原文表 I 中，ORB-SLAM3 在 9 个序列里失败了 5 个（标 X），所以没有平均值；但在它能跑通的 xyz 序列上，误差 0.009 m，是全场最低之一。这就是传统特征点法的典型画像：\textbf{能跑的时候非常准，但经常跑不通。}失败的序列恰好包含快速旋转（rpy）和对着地板拍（floor），正是特征点法的弱项。
+
+\textbf{第三，平面场景仍然是弱项。}对着地板拍的 floor 序列上，VGGT-SLAM 2.0 的误差是 0.102 m，比 1.0 的 0.141 m 好了很多，但明显高于 MASt3R-SLAM 的 0.056 m。这说明“求解单应矩阵时的平面退化”已经解决，而“VGGT 在平面场景下本身重建得不够好”这个问题还在。论文正文没有讨论这一点。
+
+逐个序列看会更清楚。下图把 1.0、2.0 和同为未标定设定的 MASt3R-SLAM 放在一起：
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[ybar, area legend, typeset ticklabels with strut, width=17.4cm, height=6cm, bar width=7pt, ymin=0, ymax=0.16,
+  symbolic x coords={360,desk,desk2,floor,plant,room,rpy,teddy,xyz}, xtick=data,
+  xlabel={TUM RGB-D 序列}, ylabel={ATE（米）}, y tick label style={/pgf/number format/precision=2},
+  legend style={at={(0.5,1.03)},anchor=south,font=\footnotesize,legend columns=3,/tikz/every even column/.append style={column sep=8pt}},
+  every axis plot/.append style={draw=black}, enlarge x limits=0.07]
+\addplot[fill=white] coordinates {(360,0.071)(desk,0.025)(desk2,0.040)(floor,0.141)(plant,0.023)(room,0.102)(rpy,0.030)(teddy,0.034)(xyz,0.014)};
+\addplot[fill=black!75] coordinates {(360,0.050)(desk,0.025)(desk2,0.029)(floor,0.102)(plant,0.026)(room,0.063)(rpy,0.026)(teddy,0.038)(xyz,0.014)};
+\addplot[fill=black!25] coordinates {(360,0.070)(desk,0.035)(desk2,0.055)(floor,0.056)(plant,0.035)(room,0.118)(rpy,0.041)(teddy,0.114)(xyz,0.020)};
+\legend{VGGT-SLAM 1.0（SL(4)）,VGGT-SLAM 2.0,MASt3R-SLAM（未标定）}
+\end{axis}
+\end{tikzpicture}
+\tucap{图 12\quad 原文表 I 未标定部分逐序列的误差}
+\end{center}
+
+2.0 相对 1.0 的提升主要来自三个序列：360（绕一圈拍）从 0.071 降到 0.050，floor 从 0.141 降到 0.102，room（绕房间一周）从 0.102 降到 0.063。这三个都是轨迹长、容易累积漂移的序列，与“减少自由度、抑制漂移”的设计目标对得上。desk、plant、xyz 这类短序列上几乎没有差别，teddy 上 2.0 甚至略差。和 MASt3R-SLAM 相比，两者各有胜负：2.0 在 room 和 teddy 上明显更好，MASt3R-SLAM 在 floor 上明显更好。平均值上的差距（0.041 对 0.060）主要由 room、teddy 两个序列贡献。
+
+\Needspace{16\baselineskip}\isub{2. 速度：时间都花在哪}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[xbar, width=12cm, height=4.8cm, bar width=10pt, xmin=0, xmax=1450,
+  xlabel={处理一个 16 帧子图的耗时（毫秒）},
+  symbolic y coords={后端优化,闭环检测,关键帧检测,开放集语义（可选）,VGGT 推理},
+  ytick=data, y tick label style={font=\small}, nodes near coords, nodes near coords style={font=\footnotesize},
+  every axis plot/.append style={draw=black}, enlarge y limits=0.15]
+\addplot[fill=black!35] coordinates {(1248,VGGT 推理) (368,开放集语义（可选）) (176,关键帧检测) (128,闭环检测) (8,后端优化)};
+\end{axis}
+\end{tikzpicture}
+\tucap{图 13\quad 耗时分解（原文表 IV，RTX 3090）。后端优化只要 8 毫秒}
+\end{center}
+
+这张图说明，这类系统的瓶颈\textbf{完全在神经网络推理}上。传统 SLAM 花大力气优化的后端，在这里已经便宜到可以忽略。整体速度在 3090 上约每秒 8.4 帧，同一台机器上 MASt3R-SLAM 为 7.2 帧、1.0 为 6.9 帧。在 Jetson Thor 上把子图缩小到 4 帧，可以装在移动机器人上实时运行（每秒 3.5 帧），而 1.0 只能处理离线图片。
+
+\isub{3. 地图能拿来做什么：开放集物体检测}
+
+第 V-D 节展示了一个应用：用户输入一句英文描述，比如“backpack”，系统在三维地图里框出这个物体。“开放集”是指要找的物体类别事先没有限定，任何能用文字描述的东西都可以查。流程如下：
+
+\begin{center}
+\begin{tikzpicture}[font=\small,node distance=0.55cm,
+  st/.style={draw,thick,rounded corners=3pt,align=center,minimum height=1.05cm,text width=2.35cm}]
+\node[st] (a) {文本查询\\“backpack”};
+\node[st,right=of a] (b) {CLIP 文本向量};
+\node[st,right=of b] (c) {与每个关键帧的\\图像向量比相似度};
+\node[st,right=of c] (d) {取最相似的\\关键帧};
+\node[st,below=0.9cm of d] (e) {SAM 3 在该帧上\\分割出物体};
+\node[st,left=of e] (f) {找出掩膜对应的\\地图三维点};
+\node[st,left=of f] (g) {计算最小的\\三维有向包围盒};
+\foreach \x/\y in {a/b,b/c,c/d,d/e,e/f,f/g} \draw[-{Stealth},thick] (\x) -- (\y);
+\node[left=0.5cm of g,align=left,font=\footnotesize] {全程约 0.36 秒\\（RTX 3090）};
+\end{tikzpicture}
+\tucap{图 14\quad 开放集物体检测流程（对应原文图 6）。建图时每个关键帧预先算好一个 CLIP 图像向量}
+\end{center}
+
+这里的 CLIP 是一种把图片和文字映射到同一个向量空间的网络，意思相近的图和文，向量方向也相近，所以可以用文字去搜图；SAM 3 是 Meta 的分割模型，给它一张图和一个词，它把对应物体的轮廓抠出来。这一部分没有算法上的新东西，作者的用意是说明：地图的每个点都能追溯到某一帧的某个像素，二维视觉模型的结果就能直接“贴”到三维地图上。对于要让机器人“去把背包拿过来”的应用，这比单纯的几何地图有用得多。
+
+原文还展示了两个更大的场景：一座约 390 平方米的谷仓（34 个子图，iPhone 拍摄），以及 KITTI 05 号驾驶序列（超过 2.2 千米）。1.0 在 KITTI 上会发散，原因正是第四节讲的两点：两次闭环之间距离太长导致漂移，路面上的点几乎都在一个平面上导致退化。2.0 能跑通，是对改进一最直接的验证。
+
+\isec{九、局限，以及可以做的方向}
+
+作者在第 VI 节列了三条局限，每一条都对应一个可以动手的方向。
+
+\textbf{1. VGGT 失败时系统跟着崩。}空房子里只拍到白墙时，VGGT 本身重建失败，2.0 也会发散。作者建议加入“跟踪丢失恢复模块”。可参考的现成方案有两个：ORB-SLAM3 的做法是跟丢后另开一张地图，以后认出老地方再合并；MASt3R-SLAM 有专门的重定位模块。另外，VGGT 输出的置信度图可以用来提前预警：一段子图的置信度整体偏低，就说明这段很可能要出问题。
+
+\textbf{2. 后端只优化位姿，不优化三维点。}三维点的位置完全信任 VGGT，拼接处可能出现重影。传统 SLAM 的光束法平差会同时调整位姿和点，但那需要跨帧的点对应关系，而“不需要做匹配”正是本文方法简洁的来源。值得注意的是，后端只占 8 毫秒，\textbf{这里有大量的计算余量}，即使把后端做重十倍也只占总时间的百分之五左右。MASt3R-SLAM 用加权平均融合同一处的多次预测，是一个现成的参考。
+
+\textbf{3. 子图的第一帧影响太大。}VGGT 以第一帧为参考重建整段子图，缩放比例也靠它来算。目前第一帧纯粹按时间顺序决定。改为从这批帧里挑一张视野好、纹理丰富、置信度高的当参考，是三条里最具体、工作量最小的改进。
+
+\keypt{\textbf{一个值得尝试的想法。}本文从第 22 层注意力里挖出了“两图是否重叠”的信息。已有工作 [36] 证明，理解 DUSt3R 各层的含义可以用来检测运动物体。在 VGGT 上还没有人做这件事：能否从某一层的注意力里分辨出画面中哪些区域是运动的？如果可以，就能在不训练新网络的前提下，让系统处理动态场景。}
+
+\isec{十、在整条技术线上的位置}
+
+把这篇论文放回近十年视觉 SLAM 的发展里看，有一条很清楚的主线：\textbf{网络一次能“看”的图越来越多，系统需要手工完成的步骤越来越少。}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,x=1.45cm]
+\draw[thick,-{Stealth}] (-0.3,0) -- (11.6,0);
+\foreach \y in {2015,2017,2019,2021,2023,2025} \draw (\y-2015,0.08) -- (\y-2015,-0.08) node[below] {\y};
+\draw (11,0.08) -- (11,-0.08) node[below] {2026};
+\foreach \x/\h/\t in {0/1.0/{ORB-SLAM\\特征点法},2/1.9/{ORB-SLAM2\\双目、RGB-D},6/1.0/{ORB-SLAM3\\多地图、IMU}}
+  {\draw[black!50] (\x,0) -- (\x,\h); \node[draw,fill=white,align=center,inner sep=2pt,anchor=south] at (\x,\h) {\t};}
+\draw[black!50] (6.1,0) -- (6.1,-0.75); \node[draw,fill=white,align=center,inner sep=2pt,anchor=north] at (6.1,-0.75) {DROID-SLAM\\学习光流+稠密优化};
+\foreach \x/\h/\t in {9/1.0/{DUSt3R、MASt3R\\一次看 2 张图},10/2.35/{VGGT\\一次看一批图}}
+  {\draw[black!50] (\x,0) -- (\x,\h); \node[draw,thick,fill=black!10,align=center,inner sep=2pt,anchor=south] at (\x,\h) {\t};}
+\draw[black!50] (10.05,0) -- (10.05,-0.75); \node[draw,thick,fill=black!10,align=center,inner sep=2pt,anchor=north] at (10.05,-0.75) {MASt3R-SLAM\\VGGT-SLAM};
+\draw[black!50] (11,0) -- (11,1.0); \node[draw,very thick,fill=black!25,align=center,inner sep=2pt,anchor=south] at (11,1.0) {\textbf{VGGT-SLAM}\\\textbf{2.0}};
+\end{tikzpicture}
+\tucap{图 15\quad 技术演进时间线。白框为传统或学习型 SLAM，灰框为几何基础模型及建立在其上的 SLAM}
+\end{center}
+
+2015 到 2021 年是特征点法的成熟期，ORB-SLAM 系列把“提特征、匹配、三角化、优化”这套流程做到了极致。2021 年的 DROID-SLAM 让网络接管了“找对应”这一步，但三维结构仍由优化算出。2024 年的 DUSt3R 和 MASt3R 更进一步，网络看两张图直接给出三维点；2025 年的 VGGT 能一次处理一批图。MASt3R-SLAM 和 VGGT-SLAM 分别是在这两类模型上搭 SLAM 的第一批代表作，2.0 则是后者的修正版。
+
+\begin{center}
+\small
+\begin{tabular}{p{2.6cm}p{3.6cm}p{3.6cm}p{3.9cm}}
+\toprule
+ & ORB-SLAM3（2021） & MASt3R-SLAM（2025） & VGGT-SLAM 2.0（2026）\\
+\midrule
+三维信息从哪来 & 提特征、匹配、三角化 & 网络每次看 2 张图，直接输出三维 & 网络每次看一批图，直接输出三维\\
+要不要标定 & 要 & 不要（有标定时更准） & 不要\\
+地图 & 稀疏点 & 稠密 & 稠密\\
+一致性靠谁 & 后端优化 & 系统逐帧匹配、融合、优化 & 批内靠网络，批间靠因子图\\
+硬件 & 只要 CPU & GPU & GPU\\
+主要弱点 & 低纹理、纯旋转 & 镜头畸变、全分辨率慢 & 网络失败时无法恢复\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+三者有一个共同点：\textbf{后端都是传统的优化方法。}深度学习一步步接管了前端，从手工特征到网络直接给出三维，但“把局部结果拼成全局一致”这件事，至今仍由因子图和闭环完成。网络一次能看的图越多，后端要做的事就越少，但只要场景大于网络的视野，后端就不可替代。
+
+\isec{十一、常见疑问}
+
+\textbf{问：为什么不把所有图一次性交给 VGGT？}\quad 显存不够。VGGT 内部的注意力要让每个图像小块和所有其他小块两两比较，计算量和显存随图片数量大致按平方增长。24 GB 显存大约只能放下 60 张，几百张图一次性处理是不现实的，所以只能分段。
+
+\textbf{问：没有标定、只有一个相机，地图的真实大小从哪来？}\quad 得不到。单目相机只看到图像，无法区分“一个小房间离得近”和“一个大房间离得远”。论文第 IV 节开头就说明，恢复的几何与真实场景之间差一个相似变换，也就是差一个整体的旋转、平移和缩放。评测轨迹时，通常先用相似变换把估计轨迹和真值对齐，再计算误差。
+
+\textbf{问：子图间边规定旋转、平移为零，会不会太绝对？}\quad 不会。两个节点对应的是同一张照片，它们的相对位姿本来就是零，这是事实而不是近似。VGGT 在两段里算出的位姿不一致，这部分误差由子图内边和闭环边在全局优化中分摊掉。
+
+\textbf{问：既然因子图里的边已经没有 15 个自由度了，为什么节点还用 SL(4)？}\quad 因为子图间边里含有 $\mathbf{K}_i^{-1}\mathbf{K}_j$，它不是旋转也不是缩放，只有在 SL(4) 这样更大的空间里才能表示。节点空间大，但每条边只约束其中一部分，两者并不矛盾。
+
+\textbf{问：“第 22 层”是怎么找到的？换一个模型还是第 22 层吗？}\quad 是作者把各层注意力画出来一层一层看出来的（原文图 4 对比了第 21、22、23 层），没有经过训练或搜索。这个结论只对 VGGT 成立。换成别的模型，需要用同样的方法重新找；这类“把网络内部拆开来看”的分析本身就是一个研究方向。
+
+\textbf{问：全局优化为什么不用鲁棒核函数？}\quad 鲁棒核是后端用来削弱错误闭环影响的常用手段。2.0 把错误闭环挡在了前面：只有注意力验证通过的候选才会变成边。前端足够可靠，后端就可以保持简单。反过来说，一旦验证器放进了一个错误闭环，后端没有第二道防线，这也是一个潜在风险。
+
+\textbf{问：每秒 8.4 帧算实时吗？}\quad 这里的“帧”指的是关键帧，而关键帧要求和上一帧之间至少有 50 像素的视差，正常手持拍摄时关键帧远比原始视频帧稀疏。只要相机移动不太快、每秒新产生的关键帧不超过这个数，系统就跟得上。作者在 Jetson Thor 上的实机实验也说明了这一点。
+
+\isec{十二、复现要点}
+
+代码已在 \texttt{github.com/MIT-SPARK/VGGT-SLAM} 公开，main 分支即 2.0，纯 Python 实现，不依赖 ROS。按官方步骤用 conda 建立 Python 3.11 环境、运行 \texttt{setup.sh} 即可，脚本会自动下载 VGGT、SALAD 等依赖。
+
+硬件方面有两点需要注意。第一，代码固定使用 PyTorch 2.3.1，这个版本不支持 RTX 50 系列显卡，租用服务器时应选择 RTX 3090 或 4090。第二，显存越小，子图就只能切得越短；论文的 TUM 实验用 32 帧子图，在 24 GB 显存上完成。
+
+输入可以是一个图片文件夹，也可以把手机横屏拍摄的视频用 ffmpeg 按每秒 10 帧抽成图片。最值得亲手验证的几件事：用手机拍一段自己房间的视频跑一遍；对着白墙拍一段，观察局限一描述的失败；对着地板拍一段，对照 floor 序列的误差；调整子图大小，记录显存占用和精度的变化。
+
+\end{interp}
