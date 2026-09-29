@@ -1,0 +1,10 @@
+# 论文原文、中间文件和生成的 PDF 不进仓库
+*.pdf
+*.html
+*.xdv
+*.log
+*.aux
+*.png
+*_print.tex
+__pycache__/
+.DS_Store
