@@ -115,12 +115,12 @@ json.dump({'blocks':blocks,'math':store}, open(out,'w',encoding='utf-8'), ensure
 from collections import Counter
 print(out, Counter(b['type'] for b in blocks), '行内公式', len(store))
 
-# 待译清单：到参考文献为止；图表的子图题用“块号.s序号”
+# 待译清单：跳过参考文献条目，参考文献之后的附录照常列出；图表的子图题用“块号.s序号”
 TAG = {'para': 'P', 'footnote': '脚注', 'figure': '图题', 'table': '表题'}
 with open(f'{name}_src.txt', 'w', encoding='utf-8') as f:
     for b in blocks:
         if b['type'] == 'heading':
-            if b['en'].strip().lower().endswith('references'): break
+            if b['en'].strip().lower().endswith('references'): continue   # 参考文献条目不译，其后的附录照常列出
             f.write(f"{b['id']} [H{b['level']}] {b['en']}\n")
         elif b['type'] in TAG:
             if b.get('src'): f.write(f"{b['id']} [{TAG[b['type']]}] {b['src']}\n")
