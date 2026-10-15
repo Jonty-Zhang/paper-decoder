@@ -49,10 +49,12 @@ def needs_translation(s):
     s2 = re.sub(r'\[[\d,\s–-]+\]', '', s2)            # 引用编号
     return re.search(r'[A-Za-z]{2,}', s2) is not None and not re.fullmatch(r'[A-Z]', s2.strip())
 
+AF = f'{name}_anchors.json'          # 已做过锚定时，跳过不在 PDF 中的附录表格
+ABSENT = set(json.load(open(AF)).get('absent', [])) if os.path.exists(AF) else set()
 out, strings = {}, []
 for b in D['blocks']:
-    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): break
-    if b['type'] != 'table': continue
+    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): continue   # 附录里的表格也要翻译
+    if b['type'] != 'table' or b['id'] in ABSENT: continue
     grids = []
     for th in b.get('tables', []):
         t = lxml.html.fromstring(th)
