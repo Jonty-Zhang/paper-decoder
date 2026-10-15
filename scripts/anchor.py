@@ -6,7 +6,10 @@ D = json.load(open(f'{name}.json')); LAY = json.load(open(f'{name}_layout.json')
 LINES = json.load(open(f'{name}_lines.json')); pages = LAY['pages']
 OVR = json.load(open(f'{name}_anchor_override.json')) if __import__('os').path.exists(f'{name}_anchor_override.json') else {}
 
-def norm(s): return re.sub(r'[^a-z0-9]', '', s.lower())
+CITE = re.compile(r'\[[\d,\s–-]+\]')
+def norm(s):
+    # 引用编号不参与匹配：补充材料常用另一套编号，HTML 与 PDF 会对不上
+    return re.sub(r'[^a-z0-9]', '', CITE.sub('', s).lower())
 def region(pi, x, y):
     p = pages[pi]; cx = p['w'] / 2
     for bi, bd in enumerate(p['bands']):
@@ -26,11 +29,14 @@ for pi, pl in enumerate(LINES):
         L.append({'page': pi, 'band': bi, 'col': col, 'y': l['y0'], 'x0': l['x0'],
                   'n': norm(l['t']), 'n3': norm(l['t'] + nxt)})
 
-blocks = []
+blocks, POST, seen = [], set(), False      # POST：参考文献之后的块（附录、补充材料）
 for b in D['blocks']:
-    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): break
+    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): seen = True; continue
     if b['type'] == 'bib': continue
     blocks.append(b)
+    if seen: POST.add(b['id'])
+# PDF 中参考文献标题的位置：附录的块只能锚定在它之后
+REFPOS = next(((l['page'], l['y']) for l in L if l['n'] == 'references'), None)
 
 def src_text(b):
     # 图表块的主标题为空时（几张子表共用一个块），用第一个子标题
@@ -47,7 +53,7 @@ def label_keys(b):
 
 def pattern(b):
     if b['type'] == 'heading':
-        t = re.sub(r'^([IVX]+(-[A-Z])?|\d+(\.\d+)*)\s+', '', b['en'].strip())
+        t = re.sub(r'^(Appendix\s+[A-Z]\.?\s+|[IVX]+(-[A-Z])?\s+|\d+(\.\d+)*\s+)', '', b['en'].strip())
         return ('head', norm(t))
     text = src_text(b)
     segs = re.split(r'⟦M\d+⟧', text)
@@ -56,14 +62,17 @@ def pattern(b):
     s1 = norm(segs[1])[:12] if len(segs) > 1 else ''
     return ('start', re.escape(s0) + r'[a-z0-9]{0,30}?' + re.escape(s1))
 
-anchors, prev, fails = {}, None, []
+anchors, prev, fails, absent = {}, None, [], []
 for b in blocks:
     if b['type'] in ('equation', 'authors') or (b['type'] == 'heading' and b['level'] == 1): continue
     if b['id'] in OVR: anchors[b['id']] = OVR[b['id']]; prev = OVR[b['id']]; continue
+    post = b['id'] in POST
+    if post and absent:                       # 附录第一个标题都没找到：整个附录不在这份 PDF 里
+        absent.append(b['id']); continue
     kind, pat = pattern(b)
     if not pat: continue
     cands = []
-    for l in L:
+    for l in (x for x in L if not post or REFPOS is None or (x['page'], x['y']) > REFPOS):
         if kind == 'head':
             ok = (l['n'].endswith(pat) and len(l['n']) - len(pat) <= 6) or \
                  (pat == 'abstract' and l['n'].startswith('abstract'))
@@ -77,11 +86,21 @@ for b in blocks:
     pick = min(after, key=key) if after else (min(cands, key=key) if cands else None)
     if pick:
         a = {k: pick[k] for k in ('page', 'band', 'col', 'y')}; anchors[b['id']] = a; prev = a
+    elif post and not any(x in anchors for x in POST):
+        absent.append(b['id'])                # 附录开头就对不上，按“不在 PDF 中”处理
     else:
         fails.append(b['id'])
+if absent:                                    # 附录不在 PDF 中时，其后的块统统不用翻译、不排版
+    absent = [b['id'] for b in blocks if b['id'] in POST]
 
-json.dump({'anchors': anchors, 'fails': fails}, open(f'{name}_anchors.json', 'w'), indent=1)
+json.dump({'anchors': anchors, 'fails': fails, 'absent': absent}, open(f'{name}_anchors.json', 'w'), indent=1)
 print(f'{name}: 锚定 {len(anchors)} 个，失败 {len(fails)} 个: {fails}')
+if absent:
+    print(f'参考文献之后的 {len(absent)} 个块（{absent[0]}–{absent[-1]}）不在这份 PDF 中，不用翻译，已从 {name}_src.txt 中删去')
+    sf = f'{name}_src.txt'
+    if __import__('os').path.exists(sf):
+        keep = [l for l in open(sf, encoding='utf-8') if l.split(' ', 1)[0].split('.')[0] not in absent]
+        open(sf, 'w', encoding='utf-8').writelines(keep)
 # 检查：锚点是否按文档顺序单调（不单调说明可能匹配错位置）
 seq = [(bid, anchors[bid]) for bid in [b['id'] for b in blocks] if bid in anchors]
 bad = [(seq[i][0], seq[i+1][0]) for i in range(len(seq)-1) if key(seq[i+1][1]) < key(seq[i][1])]
