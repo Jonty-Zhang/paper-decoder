@@ -6,7 +6,8 @@
 import json, re, sys, html, os
 name, origpdf, outtex = sys.argv[1], sys.argv[2], sys.argv[3]
 D = json.load(open(f'{name}.json')); LAY = json.load(open(f'{name}_layout.json'))
-A = json.load(open(f'{name}_anchors.json'))['anchors']
+AJ = json.load(open(f'{name}_anchors.json')); A = AJ['anchors']
+ABSENT = set(AJ.get('absent', []))   # 只在 HTML 里、不在这份 PDF 里的附录块
 pages = LAY['pages']; B = {b['id']: b for b in D['blocks']}
 ZH = {}
 for line in open(f'{name}_zh.txt', encoding='utf-8'):
@@ -105,7 +106,7 @@ if os.path.exists(f'{name}_tables_zh.txt'):
             if v.strip(): TZH[k.strip()] = v.strip()
 SYM = {'✓': r'$\checkmark$', '✔': r'$\checkmark$', '✗': r'$\times$', '✘': r'$\times$'}
 def cell2tex(c):
-    s = TZH.get(c['t'], c['t'])
+    s = remap_cites(TZH.get(c['t'], c['t']))
     parts = re.split(r'(\$[^$]*\$)', s)
     s = ''.join(p if p.startswith('$') else ''.join(SYM.get(ch, esc(ch)) for ch in p) for p in parts)
     if c['b'] and s: s = r'\textbf{' + s + '}'
@@ -161,7 +162,8 @@ def fullpages_for(ids):
 # ---------- 检查译文是否齐全 ----------
 need = []
 for b in D['blocks']:
-    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): break
+    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): continue
+    if b['id'] in ABSENT: continue
     if b['type'] in ('para', 'footnote') and b['id'] not in ZH: need.append(b['id'])
     if b['type'] == 'heading' and b['level'] == 1 and b['id'] not in ZH: need.append(b['id'])
     if b['type'] in ('figure', 'table') and b.get('src') and b['id'] not in ZH: need.append(b['id'])
@@ -171,8 +173,8 @@ if need:
 # ---------- 分组：锚点 + 其后未锚定的块（行间公式等）归入同组 ----------
 order = []
 for b in D['blocks']:
-    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): break
-    if b['type'] in ('bib', 'authors'): continue
+    if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): continue
+    if b['type'] in ('bib', 'authors') or b['id'] in ABSENT: continue
     order.append(b['id'])
 groups, owner = {}, None       # (page,band,col,y) -> [ids]
 for bid in order:
@@ -219,19 +221,86 @@ def refstrips(pi, xa, xb, ya, yb):
     n = max(1, round((yb - ya) / 110))
     c = gap_cuts(pi, xa, xb, ya, yb, n)
     REFSTRIPS.extend(crop(pi, xa, c[k], xb, c[k+1], r'\linewidth') for k in range(len(c) - 1))
+# 参考文献之后若还有附录（arXiv 常把补充材料接在参考文献后面），参考文献到附录的第一个锚点为止
+REF_END = None
+if REF:
+    post, seen = [], False
+    for b in D['blocks']:
+        if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): seen = True; continue
+        if seen and b['type'] != 'bib' and b['id'] in A: post.append(A[b['id']])
+    if post:
+        a0 = min(post, key=lambda a: (a['page'], a['y']))
+        refs_above = any(l['y0'] < a0['y'] - 2 and re.match(r'^\[\d+\]', l['t']) for l in LINES[a0['page']])
+        # 附录另起一页（最常见）：参考文献在该页页首结束；与参考文献同页接排：在附录第一行处结束
+        REF_END = (a0['page'], a0['y'] - 2) if (a0['page'] == REF[0] or refs_above) else (a0['page'], 0)
 def in_refs(pi, y):
-    return REF is not None and (pi, y) >= (REF[0], REF[1] - 1)
+    return REF is not None and (pi, y) >= (REF[0], REF[1] - 1) and (REF_END is None or (pi, y) < REF_END)
+# HTML 版与 PDF 版的参考文献编号可能不同（排序或条目略有差异）。按标题把两份参考文献表对上，
+# 译文、表格里的引用编号一律改成 PDF 上印的编号，保证左右两栏一致
+def build_citemap():
+    if not REF: return {}
+    rows = []
+    for pi in range(REF[0], len(LINES)):
+        for l in LINES[pi]:
+            if (pi, l['y0']) < (REF[0], REF[1] - 1) or (REF_END and (pi, l['y0']) >= REF_END): continue
+            rows.append((pi, l['x0'] >= pages[pi]['w'] / 2, l['y0'], l['t'], l['x0']))
+    # 同一行里编号“[3]”与正文的 y 可能差零点几，先按行聚类（高差 < 2pt 视为同一行），行内再按 x 排
+    rows.sort(key=lambda r: (r[0], r[1], r[2]))
+    ordered, line = [], []
+    for r in rows:
+        if line and (r[0], r[1]) == (line[0][0], line[0][1]) and abs(r[2] - line[0][2]) < 2: line.append(r); continue
+        ordered += sorted(line, key=lambda q: q[4]); line = [r]
+    ordered += sorted(line, key=lambda q: q[4])
+    parts = re.split(r'\[(\d+)\]', ' '.join(r[3] for r in ordered))
+    pdf = {int(parts[i]): re.sub(r'[^a-z0-9]', '', parts[i + 1].lower()) for i in range(1, len(parts) - 1, 2)}
+    cmap = {}
+    for b in D['blocks']:
+        if b['type'] != 'bib': continue
+        t = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', b['en_html']))).strip()
+        m = re.match(r'\[(\d+)\]\s*(.*)', t)
+        if not m: continue
+        title = re.split(r'\(\d{4}[a-z]?\)\s*', m.group(2), maxsplit=1)[-1]      # 作者-年份格式：年份后面是标题
+        nt = re.sub(r'[^a-z0-9]', '', title.lower())
+        for key in (nt[:28], nt[8:36]):        # 标题开头是公式时（如 π³），两边写法不同，改用标题中段匹配
+            hits = [n for n, e in pdf.items() if len(key) >= 12 and key in e]
+            if len(hits) == 1: cmap[int(m.group(1))] = hits[0]; break
+    nbib = sum(1 for b in D['blocks'] if b['type'] == 'bib')
+    if nbib and len(cmap) < 0.5 * nbib:      # 对上的条目太少，说明解析不可靠，宁可不改
+        print(f'参考文献只对上 {len(cmap)}/{nbib} 条，不改写引用编号'); return {}
+    return {h: p for h, p in cmap.items() if h != p}
+CITEMAP = build_citemap()
+def remap_cites(s):
+    if not CITEMAP: return s
+    def fix(m):
+        return '[' + re.sub(r'\d+', lambda d: str(CITEMAP.get(int(d.group(0)), d.group(0))), m.group(1)) + ']'
+    return re.sub(r'\[([\d,\s–-]+)\]', fix, s)
+ZH = {k: remap_cites(v) for k, v in ZH.items()}
+if CITEMAP: print('引用编号按 PDF 改写:', ', '.join(f'[{h}]→[{p}]' for h, p in sorted(CITEMAP.items())))
+def flush_refs():
+    if REFSTRIPS:
+        flush_carry()
+        body.append(r'\par\vspace{6pt}\begin{multicols}{2}\raggedcolumns' + '\n'
+                    + '\n'.join('\\noindent' + x + r'\par' for x in REFSTRIPS) + '\n' + r'\end{multicols}')
+        REFSTRIPS.clear()
 
 body = []
 title_ids = groups.get(('T',), [])
+CARRY = {'notes': '', 'full': ''}   # 跨栏/跨页段落的注释与整页讲解，等这一段在下一栏排完再放
+def flush_carry():
+    if CARRY['notes']: body.append(r'\par\noindent\begin{minipage}{\textwidth}' + CARRY['notes'] + r'\end{minipage}\par\vspace{6pt}')
+    if CARRY['full']: body.append(CARRY['full'])
+    CARRY['notes'] = CARRY['full'] = ''
+def take_carry():
+    n, f = CARRY['notes'], CARRY['full']; CARRY['notes'] = CARRY['full'] = ''; return n, f
 for pi, p in enumerate(pages):
     cx = p['w'] / 2; xl0, xr1 = p['xL'][0], p['xR'][1]
     for bi, bd in enumerate(p['bands']):
         y0b, y1b = bd['y0'], bd['y1']
+        if REFSTRIPS and not in_refs(pi, y0b): flush_refs()     # 参考文献结束，接着排附录
         if REF and in_refs(pi, y0b) and not bd['full']:
             refstrips(pi, xl0, cx - 1, y0b - 2, y1b + 2); refstrips(pi, cx + 1, xr1, y0b - 2, y1b + 2); continue
         if REF and pi == REF[0] and y0b < REF[1] < y1b and not bd['full']:
-            ry = REF[1] - 2
+            flush_carry(); ry = REF[1] - 2
             if REF[2] == 'L':      # 参考文献从左栏中部开始：上半段正常对照，下半段与整条右栏并排
                 gsL = sorted([(g[3], v) for g, v in groups.items() if g != ('T',) and g[:3] == (pi, bi, 'L')])
                 if gsL and gsL[0][0] - y0b > 8:
@@ -244,38 +313,44 @@ for pi, p in enumerate(pages):
                 refstrips(pi, xl0, cx - 1, ry, y1b + 2); refstrips(pi, cx + 1, xr1, y0b - 2, y1b + 2)
                 continue
         if bd['full'] and in_refs(pi, y0b):
-            if y1b - y0b >= 20: body.append(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}')
+            if y1b - y0b >= 20: flush_refs(); flush_carry(); body.append(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}')
             continue
         if bd['full']:
             ids = [i for g, v in groups.items() if g != ('T',) and g[:3] == (pi, bi, 'F') for i in v]
             if pi == 0 and bi == 0: ids = title_ids + ids
             if not ids and y1b - y0b < 20: continue
+            flush_carry()
             zh = '\n'.join(block2tex(i) for i in ids)
             body.append(r'\fullband{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}{' + zh + '}{' + notes_for(ids) + '}')
             body.append(fullpages_for(ids)); continue
         colgroups = {c: sorted([(g[3], v) for g, v in groups.items() if g != ('T',) and g[:3] == (pi, bi, c)]) for c in 'LR'}
         if not colgroups['L'] and not colgroups['R']:
-            body.append(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}'); continue
+            flush_carry(); body.append(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}'); continue
         for c in 'LR':
             xa, xb = (xl0, cx - 1) if c == 'L' else (cx + 1, xr1)
             gs = colgroups[c]
             cuts = [y for y, _ in gs]
             if not gs:
-                body.append(r'\bilrow{' + crop(pi, xa, y0b - 2, xb, y1b + 2, r'\colw') + '}{}{}'); continue
-            if cuts[0] - y0b > 8:                        # 栏顶：上一栏延续下来的文字或图，右侧留空
-                body.append(r'\bilrow{' + crop(pi, xa, y0b - 2, xb, cuts[0] - 1.5, r'\colw') + '}{}{}')
+                n, f = take_carry()
+                body.append(r'\bilrow{' + crop(pi, xa, y0b - 2, xb, y1b + 2, r'\colw') + '}{}{' + n + '}'); body.append(f); continue
+            if cuts[0] - y0b > 8:                        # 栏顶：上一栏延续下来的文字或图，右侧留空，上一段的注释放在这里
+                n, f = take_carry()
+                body.append(r'\bilrow{' + crop(pi, xa, y0b - 2, xb, cuts[0] - 1.5, r'\colw') + '}{}{' + n + '}'); body.append(f)
+            flush_carry()
             for j, (y, ids) in enumerate(gs):
                 yend = (gs[j+1][0] - 1.5) if j + 1 < len(gs) else y1b + 2
                 if REF and (pi, c) == (REF[0], REF[2]) and y < REF[1] < yend + 1: yend = REF[1] - 2
                 zh = '\n'.join(block2tex(i) for i in ids)
-                body.append(r'\bilrow{' + crop(pi, xa, y - 1.5, xb, yend, r'\colw') + '}{' + zh + '}{' + notes_for(ids) + '}')
-                body.append(fullpages_for(ids))
+                if j + 1 == len(gs) and yend > y1b:      # 一栏的最后一段，可能延续到下一栏：注释暂存
+                    body.append(r'\bilrow{' + crop(pi, xa, y - 1.5, xb, yend, r'\colw') + '}{' + zh + '}{}')
+                    CARRY['notes'], CARRY['full'] = notes_for(ids), fullpages_for(ids)
+                else:
+                    body.append(r'\bilrow{' + crop(pi, xa, y - 1.5, xb, yend, r'\colw') + '}{' + zh + '}{' + notes_for(ids) + '}')
+                    body.append(fullpages_for(ids))
             if REF and (pi, c) == (REF[0], 'R') and REF[2] == 'R' and y0b < REF[1] < y1b:
                 refstrips(pi, xa, xb, REF[1] - 2, y1b + 2)
 
-if REFSTRIPS:
-    body.append(r'\par\vspace{6pt}\begin{multicols}{2}\raggedcolumns' + '\n'
-                + '\n'.join('\\noindent' + x + r'\par' for x in REFSTRIPS) + '\n' + r'\end{multicols}')
+flush_carry(); flush_refs()
 interp = open(f'{name}_interp.tex', encoding='utf-8').read() if os.path.exists(f'{name}_interp.tex') else ''
 PRE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'preamble.tex')
 doc = open(PRE, encoding='utf-8').read() + '\n'.join(body) + '\n' + interp + '\n\\end{document}\n'
