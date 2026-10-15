@@ -21,6 +21,8 @@
 \pgfplotsset{scaled ticks=false}
 % 误差类图表的柱顶数字统一保留三位小数（0.030 而不是 0.03）
 \pgfplotsset{ate labels/.style={nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=3]{\pgfplotspointmeta}}}}
+% 原文只给两位小数时用这个，柱顶数字与原文表格保持同样的位数
+\pgfplotsset{ate labels2/.style={nodes near coords={\pgfmathprintnumber[fixed,zerofill,precision=2]{\pgfplotspointmeta}}}}
 \newlength{\colw}\setlength{\colw}{\dimexpr0.5\textwidth-6pt\relax}
 \newcommand{\zhcol}{\fontsize{9.3}{14}\selectfont\setlength{\parindent}{0pt}\setlength{\parskip}{0pt}}
 \newcommand{\notefont}{\fontsize{8.4}{12.6}\selectfont}
@@ -62,8 +64,9 @@
 % ---- 文末解读的版式 ----
 \newenvironment{interp}[1]{\clearpage{\centering\sffamily\bfseries\fontsize{20}{26}\selectfont #1\par}\vspace{14pt}%
   \fontsize{10.3}{17.5}\selectfont\setlength{\parindent}{2em}\setlength{\parskip}{2pt}}{}
-\newcommand{\isec}[1]{\par\vspace{12pt}\noindent{\sffamily\bfseries\Large #1}\par\vspace{6pt}}
-\newcommand{\isub}[1]{\par\vspace{7pt}\noindent{\sffamily\bfseries\large #1}\par\vspace{3pt}}
+% 标题后至少要放得下几行正文，否则整体挪到下一页，避免标题孤零零落在页底
+\newcommand{\isec}[1]{\par\Needspace{7\baselineskip}\vspace{12pt}\noindent{\sffamily\bfseries\Large #1}\par\vspace{6pt}}
+\newcommand{\isub}[1]{\par\Needspace{5\baselineskip}\vspace{7pt}\noindent{\sffamily\bfseries\large #1}\par\vspace{3pt}}
 \newcommand{\tucap}[1]{\par\vspace{2pt}{\centering\small #1\par}\vspace{8pt}}
 \newcommand{\keypt}[1]{\par\vspace{4pt}\noindent\setlength{\fboxsep}{6pt}\fcolorbox{black!70}{black!4}{\parbox{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}{\setlength{\parindent}{0pt}#1}}\par\vspace{6pt}}
 \begin{document}
