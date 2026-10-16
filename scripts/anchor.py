@@ -1,6 +1,6 @@
 """把每个段落/标题/图表题锚定到原版 PDF 中它“第一行”的精确位置，输出按段切分的版面
 用法: python3 anchor.py <name>"""
-import json, re, sys
+import json, re, sys, unicodedata
 name = sys.argv[1]
 D = json.load(open(f'{name}.json')); LAY = json.load(open(f'{name}_layout.json'))
 LINES = json.load(open(f'{name}_lines.json')); pages = LAY['pages']
@@ -8,8 +8,8 @@ OVR = json.load(open(f'{name}_anchor_override.json')) if __import__('os').path.e
 
 CITE = re.compile(r'\[[\d,\s–-]+\]')
 def norm(s):
-    # 引用编号不参与匹配：补充材料常用另一套编号，HTML 与 PDF 会对不上
-    return re.sub(r'[^a-z0-9]', '', CITE.sub('', s).lower())
+    # 引用编号不参与匹配：补充材料常用另一套编号，HTML 与 PDF 会对不上；ﬁ、ﬃ 等连字先拆开
+    return re.sub(r'[^a-z0-9]', '', CITE.sub('', unicodedata.normalize('NFKC', s)).lower())
 def region(pi, x, y):
     p = pages[pi]; cx = p['w'] / 2
     for bi, bd in enumerate(p['bands']):
@@ -77,7 +77,7 @@ for b in blocks:
             ok = (l['n'].endswith(pat) and len(l['n']) - len(pat) <= 6) or \
                  (pat == 'abstract' and l['n'].startswith('abstract'))
         else:
-            ok = re.match(pat, l['n3']) is not None
+            ok = bool(l['n']) and re.match(pat, l['n3']) is not None   # 只有引用编号的行（如上一段末尾的“[1, 2].”）不能当段首
         if ok: cands.append(l)
     if not cands and b['type'] in ('figure', 'table'):
         for key_ in label_keys(b):
