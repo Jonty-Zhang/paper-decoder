@@ -1,5 +1,7 @@
-// 版面分析：输出每页尺寸，以及每页从上到下的“跨栏带 / 双栏带”划分
+// 版面分析：输出每页尺寸、每页从上到下的“跨栏带 / 双栏带”划分，以及逐行墨迹分布
 // 用法: swift layout.swift <name>orig.pdf <name>_layout.json
+// 单栏论文（多数页面正文横跨中缝）整页记为一个跨栏带，并在顶层写 "single": true；
+// "ink" 是每 1pt 高一行的墨迹位掩码：页宽均分 32 格，第 k 位为 1 表示该行第 k 格有墨迹
 import Foundation
 import PDFKit
 import CoreGraphics
@@ -8,6 +10,8 @@ let args = CommandLine.arguments
 let doc = PDFDocument(url: URL(fileURLWithPath: args[1]))!
 let S: CGFloat = 2.0   // 144 dpi
 var pages: [[String: Any]] = []
+var gutRatio: [Double] = []      // 每页有墨迹的行里，中缝也有墨迹的比例：单栏正文接近 1，双栏接近 0
+var inkTop: [CGFloat] = [], inkBot: [CGFloat] = []
 
 for pi in 0..<doc.pageCount {
     let page = doc.page(at: pi)!
@@ -35,6 +39,19 @@ for pi in 0..<doc.pageCount {
             else { colMinR = min(colMinR, x); colMaxR = max(colMaxR, x) }
         }
     }
+    let dark = rowDark.filter { $0 }.count
+    gutRatio.append(dark > 0 ? Double(gutDark.filter { $0 }.count) / Double(dark) : 0)
+    inkTop.append(CGFloat(rowDark.firstIndex(of: true) ?? 0) / S)
+    inkBot.append(CGFloat(rowDark.lastIndex(of: true) ?? (H - 1)) / S)
+    var ink: [Int] = []
+    for yy in 0..<(H / Int(S)) {
+        var m = 0
+        for sub in 0..<Int(S) {
+            let row = buf + (yy * Int(S) + sub) * W
+            for x in stride(from: 0, to: W, by: 1) where row[x] < 200 { m |= 1 << min(31, x * 32 / W) }
+        }
+        ink.append(m)
+    }
     // 按空白行切块，再判断块是否跨过中缝
     var blocks: [(Int, Int, Bool)] = []
     var y = 0; let gapMin = Int(5 * S)
@@ -61,9 +78,13 @@ for pi in 0..<doc.pageCount {
     }
     pages.append(["w": box.width, "h": box.height, "bands": bands,
                   "xL": [CGFloat(colMinL) / S, CGFloat(colMaxL) / S],
-                  "xR": [CGFloat(colMinR) / S, CGFloat(colMaxR) / S]])
+                  "xR": [CGFloat(colMinR) / S, CGFloat(colMaxR) / S], "ink": ink])
 }
-
-let out: [String: Any] = ["pages": pages]
+// 单栏判定：一半以上页面的正文横跨中缝
+let single = gutRatio.filter { $0 > 0.45 }.count * 2 > gutRatio.count
+if single {
+    for i in 0..<pages.count { pages[i]["bands"] = [["y0": inkTop[i], "y1": inkBot[i], "full": true]] }
+}
+let out: [String: Any] = ["pages": pages, "single": single]
 try! JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted]).write(to: URL(fileURLWithPath: args[2]))
-print("页数 \(pages.count)")
+print("页数 \(pages.count)，" + (single ? "单栏：按阅读顺序重排" : "双栏"))
