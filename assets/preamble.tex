@@ -4,7 +4,7 @@
 \usepackage{xeCJK}
 \usepackage{graphicx,amsmath,amssymb,bm,xcolor}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,fit,backgrounds}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,fit,backgrounds,decorations.pathmorphing}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.17}
 \usepackage{booktabs,array,multicol,needspace,multirow}\setlength{\columnsep}{12pt}
@@ -13,6 +13,7 @@
 \setCJKsansfont{Heiti SC}
 \xeCJKsetup{CJKecglue={\hskip 0.15em plus 0.05em}}
 \newcommand{\Exp}{\operatorname{Exp}}
+\providecommand{\degree}{^\circ}
 \setlength{\parindent}{0pt}
 % 整页讲解顶端对齐（LaTeX 默认把单独成页的浮动内容垂直居中）
 \makeatletter\setlength{\@fptop}{0pt}\setlength{\@fpsep}{8pt}\setlength{\@fpbot}{0pt plus 1fil}\makeatother
@@ -57,6 +58,12 @@
   \noindent\begin{minipage}{\textwidth}\zhcol #2\end{minipage}\par\vspace{3pt}%
   \def\tmpnote{#3}\ifx\tmpnote\empty\else\noindent\begin{minipage}{\textwidth}#3\end{minipage}\par\fi\vspace{8pt}}
 \newcommand{\origonly}[1]{\par\noindent#1\par\vspace{6pt}}
+% ---- 单栏论文按阅读顺序重排：原文切片原大、居中，与译文、注释同宽；切片之间无缝衔接，译文可以跨页 ----
+\newenvironment{flowcol}[1]{\begin{list}{}{\setlength{\leftmargin}{\dimexpr0.5\textwidth-#1\relax}%
+  \setlength{\rightmargin}{\leftmargin}\setlength{\topsep}{0pt}\setlength{\partopsep}{0pt}%
+  \setlength{\itemsep}{0pt}\setlength{\parsep}{0pt}}\item\relax\setlength{\parskip}{0pt}}{\end{list}}
+\newcommand{\flowslice}[1]{\par\noindent#1\par\nointerlineskip}
+\newcommand{\flowzh}[1]{\par\vspace{4pt}{\zhcol #1\par}\vspace{3pt}}
 % ---- 表格译文：8pt 字号，居中；比所在栏宽时整体缩到栏宽 ----
 \newsavebox\bztab
 \newcommand{\zhtable}[1]{\par\vspace{2pt}\sbox\bztab{\fontsize{8}{10}\selectfont\setlength{\tabcolsep}{3.5pt}#1}%
