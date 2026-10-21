@@ -2,9 +2,10 @@
 用法: python3 extract.py <name>
 输入: <name>.html（arXiv 论文的 HTML 版，https://arxiv.org/html/<编号>）
 输出: <name>.json     所有块（标题、段落、脚注、公式、图表）及行内公式
-      <name>_src.txt  待翻译清单，每行“块号 [类型] 原文”，翻译写进 <name>_zh.txt
+      <name>_src.txt  待翻译清单，每行“块号 [类型] 原文”，翻译写进 <name>_zh.txt；
+                      行间公式列成“块号 [式 (n)] LaTeX”，在 <name>_zh.txt 里写这条公式的解释
 """
-import sys, json, re, copy
+import sys, json, re, copy, html as htmlmod
 import lxml.html
 from lxml import etree
 
@@ -115,13 +116,31 @@ json.dump({'blocks':blocks,'math':store}, open(out,'w',encoding='utf-8'), ensure
 from collections import Counter
 print(out, Counter(b['type'] for b in blocks), '行内公式', len(store))
 
-# 待译清单：跳过参考文献条目，参考文献之后的附录照常列出；图表的子图题用“块号.s序号”
+def eq_rows(h):
+    """行间公式的每一行：(式号或 None, LaTeX)"""
+    rows = []
+    for r in re.findall(r'<tr[^>]*>(.*?)</tr>', h, re.S):
+        alts = [htmlmod.unescape(a) for a in re.findall(r'alttext="([^"]*)"', r)]
+        if not alts: continue
+        no = re.search(r'ltx_eqn_eqno[^>]*>.*?\((\d+[a-z]?)\)', r, re.S)
+        rows.append((no.group(1) if no else None, ' '.join(a.replace(r'\displaystyle', '') for a in alts)))
+    return rows
+def eq_label(h):
+    nos = [n for n, _ in eq_rows(h) if n]
+    if not nos: return '公式'
+    return f'式 ({nos[0]})' if len(nos) == 1 else f'式 ({nos[0]})–({nos[-1]})'
+
+# 待译清单：跳过参考文献条目，参考文献之后的附录照常列出；图表的子图题用“块号.s序号”；
+# 行间公式不翻译，列出来是为了在译文栏同一位置写解释
 TAG = {'para': 'P', 'footnote': '脚注', 'figure': '图题', 'table': '表题'}
 with open(f'{name}_src.txt', 'w', encoding='utf-8') as f:
     for b in blocks:
         if b['type'] == 'heading':
             if b['en'].strip().lower().endswith('references'): continue   # 参考文献条目不译，其后的附录照常列出
             f.write(f"{b['id']} [H{b['level']}] {b['en']}\n")
+        elif b['type'] == 'equation':
+            rows = eq_rows(b['html'])
+            if rows: f.write(f"{b['id']} [{eq_label(b['html'])}] " + ' ; '.join(re.sub(r'\s+', ' ', t) for _, t in rows) + "\n")
         elif b['type'] in TAG:
             if b.get('src'): f.write(f"{b['id']} [{TAG[b['type']]}] {b['src']}\n")
             for i, p in enumerate(b.get('panels', [])):
