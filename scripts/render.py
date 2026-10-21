@@ -70,15 +70,13 @@ def zh2tex(s):
         elif p.startswith('【译注'): res.append(r'{\itshape\color{black!70}' + esc(p) + '}')
         else: res.append(esc(p))
     return ''.join(res)
-def eq2tex(b):
-    lines = []
-    for r in re.findall(r'<tr[^>]*>(.*?)</tr>', b['html'], re.S):
-        alts = [html.unescape(a) for a in re.findall(r'alttext="([^"]*)"', r)]
-        if not alts: continue
-        no = re.search(r'ltx_eqn_eqno[^>]*>.*?\((\d+[a-z]?)\)', r, re.S)
-        body = ' '.join(a.replace(r'\displaystyle', '') for a in alts)
-        lines.append(body + (r' \tag*{(' + no.group(1) + ')}' if no else r' \notag'))
-    return (r'{\small\begin{gather*}' + r' \\ '.join(lines) + r'\end{gather*}}') if lines else ''
+def eq_label(b):
+    nos = re.findall(r'ltx_eqn_eqno[^>]*>.*?\((\d+[a-z]?)\)', b['html'], re.S)
+    if not nos: return '公式'
+    return f'式 ({nos[0]})' if len(nos) == 1 else f'式 ({nos[0]})–({nos[-1]})'
+def eqzh2tex(s):
+    # 公式解释里允许直接写 $…$，其余部分按译文规则转换
+    return ''.join(p if re.fullmatch(r'\$[^$]+\$', p) else zh2tex(p) for p in re.split(r'(\$[^$]+\$)', s) if p)
 def block2tex(bid):
     b = B[bid]; t = b['type']
     if t == 'heading':
@@ -89,7 +87,8 @@ def block2tex(bid):
         return (r'\textbullet\ ' if b.get('list') else '') + zh2tex(ZH[bid]) + r'\par\vspace{2pt}'
     if t == 'footnote':
         return r'{\footnotesize\textsuperscript{' + str(b['num']) + '}' + zh2tex(ZH[bid]) + r'\par}'
-    if t == 'equation': return eq2tex(b)
+    if t == 'equation':      # 行间公式不重排，在同一位置写这条公式的解释
+        return (r'\eqexp{' + eq_label(b) + '}{' + eqzh2tex(ZH[bid]) + '}') if ZH.get(bid) else ''
     if t in ('figure', 'table'):
         main = [zh2tex(ZH[bid])] if ZH.get(bid) else []
         subs = [zh2tex(ZH[f'{bid}.s{i}']) for i in range(len(b.get('panels', []))) if f'{bid}.s{i}' in ZH]
@@ -167,11 +166,11 @@ need = []
 for b in D['blocks']:
     if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): continue
     if b['id'] in ABSENT: continue
-    if b['type'] in ('para', 'footnote') and b['id'] not in ZH: need.append(b['id'])
+    if b['type'] in ('para', 'footnote', 'equation') and b['id'] not in ZH: need.append(b['id'])
     if b['type'] == 'heading' and b['level'] == 1 and b['id'] not in ZH: need.append(b['id'])
     if b['type'] in ('figure', 'table') and b.get('src') and b['id'] not in ZH: need.append(b['id'])
 if need:
-    sys.exit(f'{name}_zh.txt 缺少这些块的译文：{" ".join(need)}')
+    sys.exit(f'{name}_zh.txt 缺少这些块的译文（行间公式要写解释）：{" ".join(need)}')
 
 # ---------- 分组：锚点 + 其后未锚定的块（行间公式等）归入同组 ----------
 order = []
@@ -281,22 +280,135 @@ ZH = {k: remap_cites(v) for k, v in ZH.items()}
 if CITEMAP: print('引用编号按 PDF 改写:', ', '.join(f'[{h}]→[{p}]' for h, p in sorted(CITEMAP.items())))
 def flush_refs():
     if REFSTRIPS:
-        flush_carry()
+        emit_pending()
         body.append(r'\par\vspace{6pt}\begin{multicols}{2}\raggedcolumns' + '\n'
                     + '\n'.join('\\noindent' + x + r'\par' for x in REFSTRIPS) + '\n' + r'\end{multicols}')
         REFSTRIPS.clear()
 
+# ---------- 按文字判断 PDF 里的一行属于哪一段（单栏重排、双栏续行拼接都用） ----------
+import unicodedata
+def nrm(s): return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKC', s).lower())
+def gtext(ids):
+    parts = []
+    for i in ids:
+        if i == 'REF': continue
+        b = B[i]; parts += [b.get('src') or '', b.get('en') or '']
+        parts += [sc.get('src', '') for sc in b.get('subcaps', [])]
+    return nrm(re.sub(r'⟦M\d+⟧', ' ', ' '.join(parts)).replace('**', ''))
+def match(n, T):
+    # 一行里六成以上的 8 字符片段出现在这一组的原文里，才算这一组的文字；只靠几个词撞上的图中标签不算
+    if len(n) < 16: return len(n) >= 3 and n in T
+    ks = range(0, len(n) - 7, 4)
+    return sum(n[k:k + 8] in T for k in ks) >= 0.6 * len(ks)
+
 body = []
 title_ids = groups.get(('T',), [])
-CARRY = {'notes': '', 'full': ''}   # 跨栏/跨页段落的注释与整页讲解，等这一段在下一栏排完再放
-def flush_carry():
-    if CARRY['notes']: body.append(r'\par\noindent\begin{minipage}{\textwidth}' + CARRY['notes'] + r'\end{minipage}\par\vspace{6pt}')
-    if CARRY['full']: body.append(CARRY['full'])
-    CARRY['notes'] = CARRY['full'] = ''
-def take_carry():
-    n, f = CARRY['notes'], CARRY['full']; CARRY['notes'] = CARRY['full'] = ''; return n, f
-SINGLE = LAY.get('single', False)
-XLMED = sorted(p['xL'][0] for p in pages)[len(pages) // 2]; XRMED = sorted(p['xR'][1] for p in pages)[len(pages) // 2]   # 单栏论文不按原版页面逐带裁切，改走下面的 flow()
+# 一栏的最后一段可能接到下一栏或下一页。先暂存不输出，看到下一栏栏顶后，把续行拼在前半段下面一起输出，
+# 原文不会被分栏、分页或译文切断；暂存期间遇到的跨栏图表等内容排在这一段之后
+PEND = {'crops': [], 'ids': None, 'h': 0.0}
+DEFER = []
+def put(x):
+    (DEFER if PEND['ids'] else body).append(x)
+def emit_pending():
+    if PEND['ids']:
+        ids, cs = PEND['ids'], PEND['crops']
+        img = cs[0] if len(cs) == 1 else r'\vbox{\offinterlineskip' + ''.join(r'\hbox{' + x + '}' for x in cs) + '}'
+        body.append(r'\bilrow{' + img + '}{' + '\n'.join(block2tex(i) for i in ids) + '}{' + notes_for(ids) + '}')
+        body.append(fullpages_for(ids))
+        PEND['crops'], PEND['ids'], PEND['h'] = [], None, 0.0
+    body.extend(DEFER); DEFER.clear()
+COLW, TEXTH = 254.8, 756.0          # 半栏宽、版心高（pt），与 preamble 的页面设置一致
+def hpt(xa, xb, ya, yb): return (yb - ya) * COLW / (xb - xa + 6)
+def inked(pi, xa, xb, ya, yb):
+    """[ya, yb) 这一截在 [xa, xb] 范围内有没有墨迹（layout.swift 的逐行墨迹位掩码，页宽 32 格）"""
+    ink, w = pages[pi].get('ink'), pages[pi]['w']
+    if not ink: return True
+    m = sum(1 << k for k in range(int(xa * 32 / w), min(31, int(xb * 32 / w)) + 1))
+    return any(ink[y] & m for y in range(max(0, int(ya) + 2), min(len(ink), int(yb) - 1)))
+def trim_bottom(pi, xa, xb, ya, yb):
+    """把切片下沿收到最后一行墨迹下方 2pt"""
+    ink, w = pages[pi].get('ink'), pages[pi]['w']
+    if not ink: return yb
+    m = sum(1 << k for k in range(int(xa * 32 / w), min(31, int(xb * 32 / w)) + 1))
+    y = min(int(yb), len(ink) - 1)
+    while y > ya + 10 and not ink[y] & m: y -= 1
+    return min(yb, y + 2.5)
+def continuation(pi, xa, xb, ya, yb):
+    """栏顶 [ya, yb) 里接着暂存那一段的续行：返回续行最后一行的下沿；不是续行返回 None"""
+    if not PEND['ids']: return None
+    T = gtext(PEND['ids'])
+    ls = sorted([l for l in LINES[pi] if xa <= (l['x0'] + l['x1']) / 2 <= xb and ya - 2 <= l['y0'] and l['y1'] <= yb + 2],
+                key=lambda l: l['y0'])
+    if not ls or ls[0]['y0'] - ya > 15: return None
+    end, prev = None, None
+    for l in ls:                      # 从栏顶往下连续的一块文字里，最后一行属于这一段的位置
+        if prev is not None and l['y0'] - prev > 10: break
+        if match(nrm(l['t']), T): end = l['y1']
+        prev = l['y1']
+    return end
+def cont_after(pi, xa, xb, ya, yb, cap_ids):
+    """图表把暂存那一段从中间隔开时（栏顶先是图、图题，下面才是这一段的续行），返回续行的起点；没有返回 None"""
+    if not PEND['ids']: return None
+    T, C = gtext(PEND['ids']), gtext(cap_ids)
+    ls = sorted([l for l in LINES[pi] if xa <= (l['x0'] + l['x1']) / 2 <= xb and ya - 2 <= l['y0'] and l['y1'] <= yb + 2],
+                key=lambda l: l['y0'])
+    for l in ls:
+        n = nrm(l['t'])
+        if match(n, C) and not match(n, T): continue        # 图题本身
+        return l['y0'] - 1.5 if match(n, T) else None
+    return None
+
+SINGLE = LAY.get('single', False)   # 单栏论文不按原版页面逐带裁切，改走下面的 flow()
+XLMED = sorted(p['xL'][0] for p in pages)[len(pages) // 2]; XRMED = sorted(p['xR'][1] for p in pages)[len(pages) // 2]
+def isfig(ids): return any(B[i]['type'] in ('figure', 'table') for i in ids)
+def do_col(pi, xa, xb, gs, y0b, ybot, may_pend):
+    """排一栏（或一栏的上半截 [y0b, ybot)）。gs 是这一栏里按 y 排好的 [(锚点 y, 块号列表)]"""
+    top = gs[0][0] - 1.5 if gs else ybot
+    ftop = None                                  # 栏顶的图形并入下面的图表题时，图表块的上沿
+    rest = None                                  # 栏顶既不是续行、也不是图形的一截，单独成一行
+    nextfig = bool(gs) and isfig(gs[0][1])
+    if top - y0b > 8:                            # 栏顶有一截不属于本栏任何一段的内容
+        ya = y0b - 2
+        e = continuation(pi, xa, xb, ya, top)
+        if e is None and PEND['ids'] and any(B[i]['type'] == 'equation' for i in PEND['ids']) and not nextfig:
+            e = top - 1.5                        # 上一段末尾是行间公式，栏顶接着的是它剩下的公式
+        if e is not None and PEND['h'] + hpt(xa, xb, ya, min(e + 1.5, top)) < 0.8 * TEXTH:
+            yc = min(e + 1.5, top)               # 上一栏那一段的续行：拼到它的原文切片下面
+            PEND['crops'].append(crop(pi, xa, ya, xb, yc, r'\colw')); PEND['h'] += hpt(xa, xb, ya, yc)
+            if not gs and top - yc <= 8 and may_pend: return    # 整栏都是续行，这一段可能还要接到下一栏
+            ya = yc
+        if top - ya > 8:                         # 剩下的：图形并入下面的图表题，否则单独一行
+            if nextfig: ftop = ya
+            elif inked(pi, xa, xb, ya, top): rest = (ya, top)    # 只剩空白就不输出
+    # 图表把那一段从中间隔开（栏顶先是一张或几张图表，下面才是续行）：图表块在续行处截断，续行拼回那一段
+    fcut, k = None, 0
+    while k < len(gs) and isfig(gs[k][1]): k += 1
+    if PEND['ids'] and k:
+        yend0 = (gs[k][0] - 1.5) if k < len(gs) else ybot
+        r0 = cont_after(pi, xa, xb, gs[k - 1][0], yend0, gs[k - 1][1])
+        if r0 is not None and PEND['h'] + hpt(xa, xb, r0, yend0) < 0.8 * TEXTH:
+            PEND['crops'].append(crop(pi, xa, r0, xb, yend0, r'\colw')); PEND['h'] += hpt(xa, xb, r0, yend0)
+            fcut = (k - 1, r0)
+    emit_pending()
+    if rest: body.append(r'\bilrow{' + crop(pi, xa, rest[0], xb, rest[1], r'\colw') + '}{}{}')
+    # 暂存哪一段：一栏的最后一段；栏底是脚注时，暂存脚注上面那一段，脚注排在这一段之后
+    pj = len(gs) - 1
+    if pj >= 1 and all(B[i]['type'] == 'footnote' for i in gs[pj][1]): pj -= 1
+    for j, (y, ids) in enumerate(gs):
+        ys = ftop if (j == 0 and ftop is not None) else y - 1.5
+        yend = (gs[j+1][0] - 1.5) if j + 1 < len(gs) else ybot
+        cut = fcut is not None and j == fcut[0]
+        if cut: yend = fcut[1]
+        zh = '\n'.join(block2tex(i) for i in ids)
+        if ys < y - 3:                           # 切片从图形顶端开始：中文图题下移，与英文图题第一行齐平
+            zh = r'\vspace*{%.1fpt}' % hpt(xa, xb, ys, y - 1.5) + zh
+        if j == pj and may_pend and not cut:     # 一栏的最后一段，可能接到下一栏：暂存（去掉底部空白，续行才能紧接着）
+            yend = trim_bottom(pi, xa, xb, ys, yend)
+            PEND['crops'], PEND['ids'], PEND['h'] = [crop(pi, xa, ys, xb, yend, r'\colw')], ids, hpt(xa, xb, ys, yend)
+        else:
+            put(r'\bilrow{' + crop(pi, xa, ys, xb, yend, r'\colw') + '}{' + zh + '}{' + notes_for(ids) + '}')
+            put(fullpages_for(ids))
+
 for pi, p in ([] if SINGLE else enumerate(pages)):
     cx = p['w'] / 2; xl0, xr1 = p['xL'][0], p['xR'][1]
     # 某页的左右边界比全文中位数宽出 8pt 以上，多半是页边竖排的 arXiv 编号被算了进来，改用中位数
@@ -306,57 +418,35 @@ for pi, p in ([] if SINGLE else enumerate(pages)):
         y0b, y1b = bd['y0'], bd['y1']
         if REFSTRIPS and not in_refs(pi, y0b): flush_refs()     # 参考文献结束，接着排附录
         if REF and in_refs(pi, y0b) and not bd['full']:
-            refstrips(pi, xl0, cx - 1, y0b - 2, y1b + 2); refstrips(pi, cx + 1, xr1, y0b - 2, y1b + 2); continue
-        if REF and pi == REF[0] and y0b < REF[1] < y1b and not bd['full']:
-            flush_carry(); ry = REF[1] - 2
-            if REF[2] == 'L':      # 参考文献从左栏中部开始：上半段正常对照，下半段与整条右栏并排
-                gsL = sorted([(g[3], v) for g, v in groups.items() if g != ('T',) and g[:3] == (pi, bi, 'L')])
-                if gsL and gsL[0][0] - y0b > 8:
-                    body.append(r'\bilrow{' + crop(pi, xl0, y0b - 2, cx - 1, gsL[0][0] - 1.5, r'\colw') + '}{}{}')
-                for j, (y, ids) in enumerate(gsL):
-                    yend = (gsL[j+1][0] - 1.5) if j + 1 < len(gsL) else ry
-                    body.append(r'\bilrow{' + crop(pi, xl0, y - 1.5, cx - 1, yend, r'\colw') + '}{'
-                                + '\n'.join(block2tex(i) for i in ids) + '}{' + notes_for(ids) + '}')
-                    body.append(fullpages_for(ids))
-                refstrips(pi, xl0, cx - 1, ry, y1b + 2); refstrips(pi, cx + 1, xr1, y0b - 2, y1b + 2)
-                continue
+            emit_pending(); refstrips(pi, xl0, cx - 1, y0b - 2, y1b + 2); refstrips(pi, cx + 1, xr1, y0b - 2, y1b + 2); continue
+        colgroups = {c: sorted([(g[3], v) for g, v in groups.items() if g != ('T',) and g[:3] == (pi, bi, c)]) for c in 'LR'}
+        if REF and pi == REF[0] and y0b < REF[1] < y1b and not bd['full'] and REF[2] == 'L':
+            # 参考文献从左栏中部开始：上半截照常对照，下半截与整条右栏一起按参考文献排
+            ry = REF[1] - 2
+            do_col(pi, xl0, cx - 1, [g for g in colgroups['L'] if g[0] < ry], y0b, ry, False)
+            emit_pending()
+            refstrips(pi, xl0, cx - 1, ry, y1b + 2); refstrips(pi, cx + 1, xr1, y0b - 2, y1b + 2)
+            continue
         if bd['full'] and in_refs(pi, y0b):
-            if y1b - y0b >= 20: flush_refs(); flush_carry(); body.append(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}')
+            if y1b - y0b >= 20: flush_refs(); emit_pending(); body.append(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}')
             continue
         if bd['full']:
             ids = [i for g, v in groups.items() if g != ('T',) and g[:3] == (pi, bi, 'F') for i in v]
             if pi == 0 and bi == 0: ids = title_ids + ids
             if not ids and y1b - y0b < 20: continue
-            flush_carry()
             zh = '\n'.join(block2tex(i) for i in ids)
-            body.append(r'\fullband{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}{' + zh + '}{' + notes_for(ids) + '}')
-            body.append(fullpages_for(ids)); continue
-        colgroups = {c: sorted([(g[3], v) for g, v in groups.items() if g != ('T',) and g[:3] == (pi, bi, c)]) for c in 'LR'}
+            put(r'\fullband{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}{' + zh + '}{' + notes_for(ids) + '}')
+            put(fullpages_for(ids)); continue
         if not colgroups['L'] and not colgroups['R']:
-            flush_carry(); body.append(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}'); continue
+            put(r'\origonly{' + crop(pi, xl0, y0b - 2, xr1, y1b + 2, r'\textwidth') + '}'); continue
         for c in 'LR':
             xa, xb = (xl0, cx - 1) if c == 'L' else (cx + 1, xr1)
-            gs = colgroups[c]
-            cuts = [y for y, _ in gs]
-            if not gs:
-                n, f = take_carry()
-                body.append(r'\bilrow{' + crop(pi, xa, y0b - 2, xb, y1b + 2, r'\colw') + '}{}{' + n + '}'); body.append(f); continue
-            if cuts[0] - y0b > 8:                        # 栏顶：上一栏延续下来的文字或图，右侧留空，上一段的注释放在这里
-                n, f = take_carry()
-                body.append(r'\bilrow{' + crop(pi, xa, y0b - 2, xb, cuts[0] - 1.5, r'\colw') + '}{}{' + n + '}'); body.append(f)
-            flush_carry()
-            for j, (y, ids) in enumerate(gs):
-                yend = (gs[j+1][0] - 1.5) if j + 1 < len(gs) else y1b + 2
-                if REF and (pi, c) == (REF[0], REF[2]) and y < REF[1] < yend + 1: yend = REF[1] - 2
-                zh = '\n'.join(block2tex(i) for i in ids)
-                if j + 1 == len(gs) and yend > y1b:      # 一栏的最后一段，可能延续到下一栏：注释暂存
-                    body.append(r'\bilrow{' + crop(pi, xa, y - 1.5, xb, yend, r'\colw') + '}{' + zh + '}{}')
-                    CARRY['notes'], CARRY['full'] = notes_for(ids), fullpages_for(ids)
-                else:
-                    body.append(r'\bilrow{' + crop(pi, xa, y - 1.5, xb, yend, r'\colw') + '}{' + zh + '}{' + notes_for(ids) + '}')
-                    body.append(fullpages_for(ids))
-            if REF and (pi, c) == (REF[0], 'R') and REF[2] == 'R' and y0b < REF[1] < y1b:
-                refstrips(pi, xa, xb, REF[1] - 2, y1b + 2)
+            if REF and (pi, c) == (REF[0], 'R') and y0b < REF[1] < y1b:      # 参考文献从右栏中部开始
+                ry = REF[1] - 2
+                do_col(pi, xa, xb, [g for g in colgroups[c] if g[0] < ry], y0b, ry, False)
+                emit_pending(); refstrips(pi, xa, xb, ry, y1b + 2)
+            else:
+                do_col(pi, xa, xb, colgroups[c], y0b, y1b + 2, True)
 
 # ---------- 单栏论文：按阅读顺序重排 ----------
 # 原版的页面边界不再保留。每一段原文的所有行（包括翻页后的续行、段中的行间公式）先连续排完，
@@ -365,7 +455,6 @@ for pi, p in ([] if SINGLE else enumerate(pages)):
 def flow():
     import unicodedata
     from collections import Counter
-    def nrm(s): return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKC', s).lower())
     # 正文栏左右边界：长行起止位置的中位数；裁切时两边各放宽 12pt，页边竖排的 arXiv 编号落在范围外
     longl = [l for pl in LINES for l in pl if len(l['t']) > 60]
     XL = sorted(l['x0'] for l in longl)[len(longl) // 2]; XR = sorted(l['x1'] for l in longl)[len(longl) // 2]
@@ -401,19 +490,7 @@ def flow():
         if ids == ['REF']: return 'ref'
         ts = {B[i]['type'] for i in ids}            # 段首的行内小标题与正文同组，按正文处理
         return 'fig' if 'figure' in ts else 'tab' if 'table' in ts else 'head' if ts <= {'heading'} else 'text'
-    def gtext(ids):
-        parts = []
-        for i in ids:
-            if i == 'REF': continue
-            b = B[i]; parts += [b.get('src') or '', b.get('en') or '']
-            parts += [sc.get('src', '') for sc in b.get('subcaps', [])]
-        return nrm(re.sub(r'⟦M\d+⟧', ' ', ' '.join(parts)).replace('**', ''))
     GT = [gtext(g[2]) for g in gl]
-    def match(n, T):
-        # 一行里六成以上的 8 字符片段出现在这一组的原文里，才算这一组的文字；只靠几个词撞上的图中标签不算
-        if len(n) < 16: return len(n) >= 3 and n in T
-        ks = range(0, len(n) - 7, 4)
-        return sum(n[k:k + 8] in T for k in ks) >= 0.6 * len(ks)
 
     # 1. 文字行归属：先归当前锚点所在的组；当前组是图表题时，正文续行归回图表之前的那一段
     def ingroup(pi, y):            # (页, y) 落在哪一组
@@ -549,8 +626,8 @@ def flow():
             body.append(r'\Needspace{60pt}' + '\n'.join(sl) + r'\vspace{8pt}'); continue
         h = PIECES[g][0][2] - PIECES[g][0][1]
         need = (min(h, 120) + (90 if kind(g) == 'head' else 30))
-        # 行间公式已经在原文切片里，译文里不再重排一遍
-        zh = '\n'.join(block2tex(i) for i in ids if B[i]['type'] != 'equation')
+        # 行间公式已经在原文切片里，译文里在同一位置写它的解释
+        zh = '\n'.join(block2tex(i) for i in ids)
         body.append(r'\Needspace{%dpt}' % need + '\n'.join(sl) + r'\flowzh{' + zh + '}' + notes_for(ids) + r'\vspace{8pt}')
         foot = slicetex(('foot', g))
         if foot: body.append('\n'.join(foot) + r'\vspace{8pt}')
@@ -558,7 +635,7 @@ def flow():
     body.append(r'\end{flowcol}')
 if SINGLE: flow()
 
-flush_carry(); flush_refs()
+emit_pending(); flush_refs()
 interp = open(f'{name}_interp.tex', encoding='utf-8').read() if os.path.exists(f'{name}_interp.tex') else ''
 PRE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'preamble.tex')
 doc = open(PRE, encoding='utf-8').read() + '\n'.join(body) + '\n' + interp + '\n\\end{document}\n'
