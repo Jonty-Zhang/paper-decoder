@@ -53,7 +53,7 @@ def label_keys(b):
 
 def pattern(b):
     if b['type'] == 'heading':
-        t = re.sub(r'^(Appendix\s+[A-Z]\.?\s+|[IVX]+(-[A-Z])?\s+|\d+(\.\d+)*\s+)', '', b['en'].strip())
+        t = re.sub(r'^(Appendix\s+[A-Z]\.?\s+|[IVX]+(-[A-Z]\d*)?\s+|\d+(\.\d+)*\s+)', '', b['en'].strip())   # 含 III-F1 这种编号
         return ('head', norm(t))
     text = src_text(b)
     segs = re.split(r'⟦M\d+⟧', text)
@@ -79,6 +79,16 @@ for b in blocks:
         else:
             ok = bool(l['n']) and re.match(pat, l['n3']) is not None   # 只有引用编号的行（如上一段末尾的“[1, 2].”）不能当段首
         if ok: cands.append(l)
+    # 行内小标题（IEEE 的“1) Master Tool Manipulator: As seen …”“Abstract— Robotic …”）：
+    # 标题在行首、正文接在同一行，标题按行首匹配，正文在行首 40 个字符以内匹配
+    if not [c for c in cands if prev is None or key(c) >= key(prev)]:
+        for l in (x for x in L if not post or REFPOS is None or (x['page'], x['y']) > REFPOS):
+            if kind == 'head':
+                ok = len(pat) >= 6 and re.match(r'[a-z]?\d{0,2}' + re.escape(pat), l['n']) is not None
+            else:
+                m = re.search(pat, l['n3'][:40 + len(pat)])
+                ok = bool(l['n']) and m is not None and m.start() <= 40
+            if ok: cands.append(l)
     if not cands and b['type'] in ('figure', 'table'):
         for key_ in label_keys(b):
             cands += [l for l in L if l['n'].startswith(key_) and not l['n'][len(key_):len(key_) + 1].isdigit()]
