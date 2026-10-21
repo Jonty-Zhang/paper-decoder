@@ -295,9 +295,13 @@ def flush_carry():
     CARRY['notes'] = CARRY['full'] = ''
 def take_carry():
     n, f = CARRY['notes'], CARRY['full']; CARRY['notes'] = CARRY['full'] = ''; return n, f
-SINGLE = LAY.get('single', False)   # 单栏论文不按原版页面逐带裁切，改走下面的 flow()
+SINGLE = LAY.get('single', False)
+XLMED = sorted(p['xL'][0] for p in pages)[len(pages) // 2]; XRMED = sorted(p['xR'][1] for p in pages)[len(pages) // 2]   # 单栏论文不按原版页面逐带裁切，改走下面的 flow()
 for pi, p in ([] if SINGLE else enumerate(pages)):
     cx = p['w'] / 2; xl0, xr1 = p['xL'][0], p['xR'][1]
+    # 某页的左右边界比全文中位数宽出 8pt 以上，多半是页边竖排的 arXiv 编号被算了进来，改用中位数
+    if xl0 < XLMED - 8: xl0 = XLMED
+    if xr1 > XRMED + 8: xr1 = XRMED
     for bi, bd in enumerate(p['bands']):
         y0b, y1b = bd['y0'], bd['y1']
         if REFSTRIPS and not in_refs(pi, y0b): flush_refs()     # 参考文献结束，接着排附录
