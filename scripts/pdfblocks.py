@@ -126,7 +126,7 @@ for pi, pl in enumerate(P):
         if inovr('eq', pi, l): l['eq'] = True
 
 # ---------- 阅读顺序：跨栏文字把页面分段，段内先左栏后右栏 ----------
-order = []
+order, SIDEX = [], []                       # SIDEX：首页标题区旁边小字框（版权框等）的左沿
 for pi, pl in enumerate(P):
     txt = [l for l in pl if not l['fig']]
     groups = []                              # 相邻的跨栏行并成一组，每组把页面切开一次
@@ -144,7 +144,8 @@ for pi, pl in enumerate(P):
         if l['y1'] <= front:
             side = l['h'] < 0.85 * H and l['col'] == 'R'
             l['key'] = (pi, -1, 2 if side else -1, l['y0'], l['x0'])
-            if not side: l['front'] = True       # 标题区的行一律按整个版心宽度裁切
+            if not side: l['front'] = True       # 标题区的行一律按整个版心宽度裁切（旁边的小字框除外）
+            else: SIDEX.append(l['x0'])
     order += sorted(txt, key=lambda l: l['key'])
 
 # 同一行被拆成几段（行内公式把一行切开）：上下重叠一半以上的视为同一行，按 x 拼起来
@@ -231,6 +232,11 @@ for i, l in enumerate(order):
     elif cur['lines'][-1]['col'] == 'S' and l['col'] == 'S' and gap is not None and gap > 0.5 * H: start = True
     if inovr('split', l['page'], l): start = True
     if inovr('join', l['page'], l): start = False
+    # 被页脚注、图表隔开的半段：小写开头、前一个段落没有以句号结束，就接回那一段
+    lastp = next((b for b in reversed(blocks + ([cur] if cur else [])) if b['type'] in ('para', 'heading', 'equation')), None)
+    if start and cur is not None and cur['type'] in ('meta',) and t[:1].islower() and lastp is not None and lastp['type'] == 'para' \
+            and not lastp['lines'][-1]['t'].rstrip().endswith(('.', ':', '?')):
+        flush(); lastp['lines'].append(l); cur = lastp; blocks.remove(lastp); continue
     if start: new('para', l)
     else: cur['lines'].append(l)
 flush()
@@ -253,7 +259,7 @@ def join_text(ls):
 def boxes(ls, pad=1.5, tight=False):
     """同一页、同一栏、上下相连的行合成一个裁切框；宽度取该栏左右边界（tight 时取文字本身的左右范围）"""
     out = []
-    full = (COLX['L'][0], COLX['R'][1]) if COLX.get('L') and COLX.get('R') else None
+    full = (COLX['L'][0], min([COLX['R'][1]] + [x - 6 for x in SIDEX])) if COLX.get('L') and COLX.get('R') else None
     for l in ls:
         x0, x1 = (l['x0'], l['x1']) if tight else (l.get('cl', l['x0']), l.get('cr', l['x1']))
         if l.get('front') and full: x0, x1 = full
@@ -262,7 +268,17 @@ def boxes(ls, pad=1.5, tight=False):
                 and (tight or (abs(out[-1][1] - x0) < 8 and abs(out[-1][3] - x1) < 8)):   # 栏宽变了（绕图）就另起一个框
             b = out[-1]; b[1] = min(b[1], x0); b[3] = max(b[3], x1); b[4] = l['y1']
         else: out.append([l['page'], x0, l['y0'], x1, l['y1'], col])
-    return [[b[0], round(b[1] - pad, 1), round(b[2] - pad, 1), round(b[3] + pad, 1), round(b[4] + pad, 1)] for b in out]
+    # 上下沿落在行间的空白里：PDF 里相邻两行的文字框互相重叠一点，直接按文字框裁会带进邻行字母的上沿或下沿
+    return [[b[0], round(b[1] - pad, 1), snap(b[0], b[1], b[3], b[2], b[2] + 1.5),
+             round(b[3] + pad, 1), snap(b[0], b[1], b[3], b[4], b[4] - 1.5)] for b in out]
+def snap(pi, x0, x1, y, want):
+    """在 y 附近 ±3pt 内找一行没有墨迹的位置（layout.swift 的 ink 位掩码，1pt 一行），取离 want 最近的；找不到就用 y 外扩 1.5pt"""
+    ink, w = pages[pi].get('ink'), pages[pi]['w']
+    if not ink: return round(y - 1.5 if want > y else y + 1.5, 1)
+    m = sum(1 << k for k in range(max(0, int(x0 * 32 / w)), min(31, int(x1 * 32 / w)) + 1))
+    rows = [r for r in range(int(y) - 3, int(y) + 4) if 0 <= r < len(ink) and not ink[r] & m]
+    if not rows: return round(y - 1.5 if want > y else y + 1.5, 1)
+    return round(min(rows, key=lambda r: abs(r + 0.5 - want)) + 0.5, 1)
 
 items = []                                   # (阅读顺序位置, 块)
 pos = {id(l): k for k, l in enumerate(order)}
@@ -301,10 +317,24 @@ for f in FIGS:
                       'pdf': [[pi, round(x0 - 2, 1), round(y0, 1), round(x1 + 2, 1), round(y1 + 2, 1)]],
                       'gfx': [pi, round(x0 - 2, 1), round(y0, 1), round(x1 + 2, 1), round(f['gbox'][3], 1)]}, f['cap']))
 items.sort(key=lambda it: it[0])
+for n, it in enumerate(items, 1): it[1]['id'] = f'B{n}'      # 块号按原文阅读顺序定，下面调整排版顺序时不变
+# 首页的作者单位、版权框等小字块挪到作者行后面，免得夹在正文段落中间
+p0 = [it for it in items if it[1]['type'] == 'meta' and it[1]['pdf'][0][0] == 0]
+if len(p0) > 1:
+    rest = [it for it in items if it not in p0[1:]]
+    k = rest.index(p0[0]); items = rest[:k + 1] + p0[1:] + rest[k + 1:]
+# 期刊的版权声明、投稿日期、末页的期刊信息等不翻译、也不必印出来的小字块，标记 drop
+BOILER = re.compile(r'copyright|rights reserved|licensee|terms of service|ISSN|reprints|view the article|submitted \d|accepted \d|published \d|^10\.\d{4}/|DOI:', re.I)
+seen_refs = False
+for it in items:
+    b = it[1]
+    if b['type'] == 'refs': seen_refs = True
+    if b['type'] == 'meta' and (BOILER.search(b.get('src', '')) or (seen_refs and b['pdf'][0][0] > 0)):
+        b['drop'] = True
 
 out, anchors = [], {}
-for n, (_, blk, ls) in enumerate(items, 1):
-    blk['id'] = f'B{n}'; out.append(blk)
+for _, blk, ls in items:
+    out.append(blk)
     p0 = blk['pdf'][0]
     anchors[blk['id']] = {'page': p0[0], 'band': 0, 'col': 'F', 'y': p0[2] + 1.5}
 json.dump({'blocks': out, 'math': {}, 'pdfmode': True}, open(f'{name}.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
