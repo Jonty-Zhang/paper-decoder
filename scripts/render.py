@@ -29,7 +29,10 @@ if os.path.exists(nf):
             _, bid, title = line.split(' ', 2); full = (bid, title, []); continue
         if line.startswith('@'): cur = line[1:].strip(); continue
         if cur and '|' in line:
-            term, text = line.split('|', 1); NOTES.setdefault(cur, []).append((term.strip(), text.strip()))
+            term, text = line.split('|', 1)
+            # 短注释里的 % 几乎都是百分号，不是注释符；没转义的自动转义，免得吞掉后半行导致括号不配对
+            term, text = (re.sub(r'(?<!\\)%', r'\\%', x.strip()) for x in (term, text))
+            NOTES.setdefault(cur, []).append((term, text))
 
 # ---------- 译文 → LaTeX（沿用上一版的转换规则） ----------
 def esc(s):
@@ -70,27 +73,32 @@ def zh2tex(s):
         elif p.startswith('【译注'): res.append(r'{\itshape\color{black!70}' + esc(p) + '}')
         else: res.append(esc(p))
     return ''.join(res)
+PDFMODE = D.get('pdfmode', False)            # 由 pdfblocks.py 直接从 PDF 拆出的块（没有 arXiv 网页版的论文）
 def eq_label(b):
-    nos = re.findall(r'ltx_eqn_eqno[^>]*>.*?\((\d+[a-z]?)\)', b['html'], re.S)
+    nos = b['nos'] if 'nos' in b else re.findall(r'ltx_eqn_eqno[^>]*>.*?\((\d+[a-z]?)\)', b['html'], re.S)
     if not nos: return '公式'
     return f'式 ({nos[0]})' if len(nos) == 1 else f'式 ({nos[0]})–({nos[-1]})'
 def eqzh2tex(s):
     # 公式解释里允许直接写 $…$，其余部分按译文规则转换
     return ''.join(p if re.fullmatch(r'\$[^$]+\$', p) else zh2tex(p) for p in re.split(r'(\$[^$]+\$)', s) if p)
+def ZT(x):                                   # PDF 模式的译文里行内公式直接写成 $…$
+    return eqzh2tex(x) if PDFMODE else zh2tex(x)
 def block2tex(bid):
     b = B[bid]; t = b['type']
     if t == 'heading':
-        if b['level'] == 1: return r'{\centering\fontsize{14}{18}\selectfont\bfseries ' + zh2tex(ZH[bid]) + r'\par}'
+        if b['level'] == 1: return r'{\centering\fontsize{14}{18}\selectfont\bfseries ' + ZT(ZH[bid]) + r'\par}'
         size = {2: r'\large', 3: r'\normalsize'}.get(b['level'], r'\normalsize')
-        return r'{' + size + r'\bfseries ' + zh2tex(ZH.get(bid, b['en'])) + r'\par}\vspace{2pt}'
+        return r'{' + size + r'\bfseries ' + ZT(ZH.get(bid, b['en'])) + r'\par}\vspace{2pt}'
     if t == 'para':
-        return (r'\textbullet\ ' if b.get('list') else '') + zh2tex(ZH[bid]) + r'\par\vspace{2pt}'
+        return (r'\textbullet\ ' if b.get('list') else '') + ZT(ZH[bid]) + r'\par\vspace{2pt}'
+    if t in ('meta', 'refs'):
+        return ZT(ZH[bid]) + r'\par' if ZH.get(bid) else ''
     if t == 'footnote':
         return r'{\footnotesize\textsuperscript{' + str(b['num']) + '}' + zh2tex(ZH[bid]) + r'\par}'
     if t == 'equation':      # 行间公式不重排，在同一位置写这条公式的解释
         return (r'\eqexp{' + eq_label(b) + '}{' + eqzh2tex(ZH[bid]) + '}') if ZH.get(bid) else ''
     if t in ('figure', 'table'):
-        main = [zh2tex(ZH[bid])] if ZH.get(bid) else []
+        main = [ZT(ZH[bid])] if ZH.get(bid) else []
         subs = [zh2tex(ZH[f'{bid}.s{i}']) for i in range(len(b.get('panels', []))) if f'{bid}.s{i}' in ZH]
         grids = TABLES.get(bid, []) if t == 'table' else []
         cap = lambda cs: (r'{\small\color{black!85}' + r'\\'.join(cs) + r'\par}\vspace{3pt}') if cs else ''
@@ -167,7 +175,7 @@ for b in D['blocks']:
     if b['type'] == 'heading' and b['en'].strip().lower().endswith('references'): continue
     if b['id'] in ABSENT: continue
     if b['type'] in ('para', 'footnote', 'equation') and b['id'] not in ZH: need.append(b['id'])
-    if b['type'] == 'heading' and b['level'] == 1 and b['id'] not in ZH: need.append(b['id'])
+    if b['type'] == 'heading' and (b['level'] == 1 or PDFMODE) and b['id'] not in ZH: need.append(b['id'])
     if b['type'] in ('figure', 'table') and b.get('src') and b['id'] not in ZH: need.append(b['id'])
 if need:
     sys.exit(f'{name}_zh.txt 缺少这些块的译文（行间公式要写解释）：{" ".join(need)}')
@@ -358,7 +366,7 @@ def cont_after(pi, xa, xb, ya, yb, cap_ids):
         return l['y0'] - 1.5 if match(n, T) else None
     return None
 
-SINGLE = LAY.get('single', False)   # 单栏论文不按原版页面逐带裁切，改走下面的 flow()
+SINGLE = LAY.get('single', False) and not PDFMODE   # 单栏论文不按原版页面逐带裁切，改走下面的 flow()
 XLMED = sorted(p['xL'][0] for p in pages)[len(pages) // 2]; XRMED = sorted(p['xR'][1] for p in pages)[len(pages) // 2]
 def isfig(ids): return any(B[i]['type'] in ('figure', 'table') for i in ids)
 def do_col(pi, xa, xb, gs, y0b, ybot, may_pend):
@@ -409,7 +417,7 @@ def do_col(pi, xa, xb, gs, y0b, ybot, may_pend):
             put(r'\bilrow{' + crop(pi, xa, ys, xb, yend, r'\colw') + '}{' + zh + '}{' + notes_for(ids) + '}')
             put(fullpages_for(ids))
 
-for pi, p in ([] if SINGLE else enumerate(pages)):
+for pi, p in ([] if SINGLE or PDFMODE else enumerate(pages)):
     cx = p['w'] / 2; xl0, xr1 = p['xL'][0], p['xR'][1]
     # 某页的左右边界比全文中位数宽出 8pt 以上，多半是页边竖排的 arXiv 编号被算了进来，改用中位数
     if xl0 < XLMED - 8: xl0 = XLMED
@@ -461,7 +469,13 @@ def flow():
     xa, xb = XL - 12, XR + 12
     # 页眉页脚：页面上下 9% 以内、在三成以上页面重复出现的文字（数字不计），或纯页码
     def fkey(t): return re.sub(r'\d+', '#', t.strip().lower())
-    def edge(pi, l): return l['y1'] < 0.09 * pages[pi]['h'] or l['y0'] > 0.91 * pages[pi]['h']
+    # 正文区上下沿：各页长行最上、最下位置的中位数；版心外的行才可能是页眉页脚（A4 与 Letter 页边距不同，不能只按页高比例）
+    tops = sorted(min(l['y0'] for l in pl if len(l['t']) > 60) for pl in LINES if any(len(l['t']) > 60 for l in pl))
+    bots = sorted(max(l['y1'] for l in pl if len(l['t']) > 60) for pl in LINES if any(len(l['t']) > 60 for l in pl))
+    BT, BB = tops[len(tops) // 2], bots[len(bots) // 2]
+    def edge(pi, l):
+        h = pages[pi]['h']
+        return l['y1'] < max(0.09 * h, BT - 2) or l['y0'] > min(0.91 * h, BB + 2)
     cnt = Counter(k for pi, pl in enumerate(LINES) for k in {fkey(l['t']) for l in pl if edge(pi, l)})
     def furniture(pi, l):
         return edge(pi, l) and (cnt[fkey(l['t'])] >= max(2, 0.3 * len(LINES)) or re.fullmatch(r'[#\s–-]*', fkey(l['t'])))
@@ -634,6 +648,45 @@ def flow():
         body.append(fullpages_for(ids))
     body.append(r'\end{flowcol}')
 if SINGLE: flow()
+
+# ---------- PDF 模式：每块自带裁切框，按块的阅读顺序逐块对照 ----------
+# 绕图排的窄栏、跨栏续行都已经在 pdfblocks.py 里拆成了框；这里只决定每块放左栏还是占满页宽
+COLWPT = 254.8                               # \colw 的大小（pt），与 preamble 的页面设置一致
+def pcrop(box, w=None):
+    pi, x0, y0, x1, y1 = box; Hp = pages[pi]['h']
+    w = w or (x1 - x0)
+    return (r'\includegraphics[page=%d,viewport=%.1f %.1f %.1f %.1f,clip,width=%.1fpt]{%s}' % (pi + 1, x0, Hp - y1, x1, Hp - y0, w, origpdf))
+def stack(bs, maxw):
+    """几个框上下无缝拼接，宽度按原大，超过 maxw 的整体缩到 maxw"""
+    sc = min(1.0, maxw / max(b[3] - b[1] for b in bs))
+    ims = [pcrop(b, (b[3] - b[1]) * sc) for b in bs]
+    return ims[0] if len(ims) == 1 else r'\vbox{\offinterlineskip' + ''.join(r'\hbox{' + x + '}' for x in ims) + '}'
+def units():
+    refs = []
+    def flush_pdfrefs():
+        if refs:
+            body.append(r'\par\vspace{6pt}\begin{multicols}{2}\raggedcolumns' + '\n' + '\n'.join(r'\noindent' + x + r'\par' for x in refs) + '\n' + r'\end{multicols}')
+            refs.clear()
+    for b in D['blocks']:
+        bid, t, bs = b['id'], b['type'], b['pdf']
+        if t == 'refs':                      # 参考文献：每栏在行间空隙处切成小条，重排成两栏
+            for (pi, x0, y0, x1, y1) in bs:
+                for k, c in enumerate(gap_cuts(pi, x0, x1, y0, y1, max(1, round((y1 - y0) / 110)))[:-1]):
+                    cc = gap_cuts(pi, x0, x1, y0, y1, max(1, round((y1 - y0) / 110)))
+                    refs.append(pcrop([pi, x0, cc[k], x1, cc[k + 1]], min(COLWPT, x1 - x0)))
+            continue
+        flush_pdfrefs()
+        zh = block2tex(bid) if (t not in ('meta',) or ZH.get(bid)) else ''
+        wide = max(x[3] - x[1] for x in bs) > COLWPT * 1.08
+        if t in ('figure', 'table') and not wide and 'gfx' in b:      # 中文图题与英文图题第一行齐平
+            zh = r'\vspace*{%.1fpt}' % ((b['gfx'][4] - bs[0][2]) * min(1.0, COLWPT / (bs[0][3] - bs[0][1]))) + zh
+        if wide:
+            body.append(r'\fullband{' + stack(bs, 521.0) + '}{' + zh + '}{' + notes_for([bid]) + '}')
+        else:
+            body.append(r'\bilrow{' + stack(bs, COLWPT) + '}{' + zh + '}{' + notes_for([bid]) + '}')
+        body.append(fullpages_for([bid]))
+    flush_pdfrefs()
+if PDFMODE: units()
 
 emit_pending(); flush_refs()
 interp = open(f'{name}_interp.tex', encoding='utf-8').read() if os.path.exists(f'{name}_interp.tex') else ''
