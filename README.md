@@ -37,6 +37,10 @@ git clone https://github.com/Jonty-Zhang/paper-decoder ~/.claude/skills/paper-de
 | `scripts/tables.py` | 抽出每张表的网格结构，列出需要翻译的单元格文字 |
 | `scripts/layout.swift` | 分析原版 PDF 每页的跨栏带与双栏带，判断单栏还是双栏，记录逐行墨迹分布 |
 | `scripts/lines.swift` | 按行提取原版 PDF 的文字及坐标 |
+| `scripts/pdfblocks.py` | 没有 arXiv 网页版时，直接从 PDF 拆出标题、段落、图表题、公式和图形区域（PDF 模式） |
+| `scripts/terms.py` | 抽候选术语建术语表；译完检查术语是否统一、数字有没有漏 |
+| `scripts/latexzh.py` | 纯中文版：把 arXiv LaTeX 源码里的正文换成译文后重新编译 |
+| `scripts/render_zh.py` | 纯中文版：没有源码时按原版版式重排中文，图和公式从原版裁切 |
 | `scripts/anchor.py` | 把每个段落定位到原版 PDF 中它第一行的位置，这是段首对齐的依据 |
 | `scripts/render.py` | 生成打印版 LaTeX：原文切片、译文、中文表格、注释、整页讲解、参考文献、解读；单栏论文按阅读顺序重排 |
 | `scripts/topng.swift` | 把 PDF 页面渲染成 PNG，用于逐页检查 |
