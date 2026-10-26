@@ -345,7 +345,7 @@ def render_pdfmode():
                 z = min(l['y1'] + 1, (l['y1'] + ms[k + 1]['y0']) / 2) if k + 1 < len(ms) else l['y1'] + 1
                 out.append([pi, l['x0'] - 1.5, a, l['x1'] + 1.5, z])
         return [r'\zhref{' + pcrop(r, maxw) + '}' for r in out] or [r'\zhref{' + pcrop(x, maxw) + '}' for x in b['pdf']]
-    BL = [b for b in D['blocks'] if b['id'] not in ABSENT]
+    BL = [b for b in D['blocks'] if b['id'] not in ABSENT and not b.get('drop')]   # drop：期刊版权声明、末页期刊信息等
     # 首页标题区：论文标题及其之前的块，以及标题之后、第一个栏宽的标题/段落之前的块；首页上沿高于它的 meta（版权框等）也归标题区
     ti = next((k for k, b in enumerate(BL) if b['type'] == 'heading' and b['level'] == 1), -1)
     fe = next((k for k, b in enumerate(BL) if k > ti and b['type'] in ('heading', 'para') and not wide(b['pdf'][0])), len(BL))
