@@ -662,7 +662,7 @@ def stack(bs, maxw):
     ims = [pcrop(b, (b[3] - b[1]) * sc) for b in bs]
     return ims[0] if len(ims) == 1 else r'\vbox{\offinterlineskip' + ''.join(r'\hbox{' + x + '}' for x in ims) + '}'
 def units():
-    refs = []
+    refs, held = [], []
     def flush_pdfrefs():
         if refs:
             body.append(r'\par\vspace{6pt}\begin{multicols}{2}\raggedcolumns' + '\n' + '\n'.join(r'\noindent' + x + r'\par' for x in refs) + '\n' + r'\end{multicols}')
@@ -670,21 +670,34 @@ def units():
     for b in D['blocks']:
         bid, t, bs = b['id'], b['type'], b['pdf']
         if t == 'refs':                      # 参考文献：每栏在行间空隙处切成小条，重排成两栏
+            for h in held:                   # “参考文献”标题单独一行，不和后面的块合并
+                body.append(r'\bilrow{' + stack(h['pdf'], COLWPT) + '}{' + block2tex(h['id']) + '}{}')
+            held.clear()
             for (pi, x0, y0, x1, y1) in bs:
                 for k, c in enumerate(gap_cuts(pi, x0, x1, y0, y1, max(1, round((y1 - y0) / 110)))[:-1]):
                     cc = gap_cuts(pi, x0, x1, y0, y1, max(1, round((y1 - y0) / 110)))
                     refs.append(pcrop([pi, x0, cc[k], x1, cc[k + 1]], min(COLWPT, x1 - x0)))
             continue
         flush_pdfrefs()
-        zh = block2tex(bid) if (t not in ('meta',) or ZH.get(bid)) else ''
+        if b.get('drop'): continue
+        if t == 'meta' and not ZH.get(bid):  # 不翻译的小字块（作者、单位）：原样裁切，不占对照栏
+            body.append(r'\par\noindent' + stack(bs, 521.0) + r'\par\vspace{4pt}'); continue
+        if t == 'heading' and b.get('level', 2) > 1:      # 小标题与下一块合成一行：标题不会孤零零落在页底
+            held.append(b); continue
+        hs, held[:] = held[:], []
+        bs = [x for h in hs for x in h['pdf']] + bs
+        ids = [h['id'] for h in hs] + [bid]
+        zh = '\n'.join(block2tex(i) for i in ids)
         wide = max(x[3] - x[1] for x in bs) > COLWPT * 1.08
-        if t in ('figure', 'table') and not wide and 'gfx' in b:      # 中文图题与英文图题第一行齐平
+        if t in ('figure', 'table') and not wide and 'gfx' in b and not hs:      # 中文图题与英文图题第一行齐平
             zh = r'\vspace*{%.1fpt}' % ((b['gfx'][4] - bs[0][2]) * min(1.0, COLWPT / (bs[0][3] - bs[0][1]))) + zh
         if wide:
-            body.append(r'\fullband{' + stack(bs, 521.0) + '}{' + zh + '}{' + notes_for([bid]) + '}')
+            body.append(r'\fullband{' + stack(bs, 521.0) + '}{' + zh + '}{' + notes_for(ids) + '}')
         else:
-            body.append(r'\bilrow{' + stack(bs, COLWPT) + '}{' + zh + '}{' + notes_for([bid]) + '}')
-        body.append(fullpages_for([bid]))
+            body.append(r'\bilrow{' + stack(bs, COLWPT) + '}{' + zh + '}{' + notes_for(ids) + '}')
+        body.append(fullpages_for(ids))
+    for h in held:                           # 文末剩下的标题
+        body.append(r'\bilrow{' + stack(h['pdf'], COLWPT) + '}{' + block2tex(h['id']) + '}{}')
     flush_pdfrefs()
 if PDFMODE: units()
 
