@@ -81,13 +81,15 @@ for b in blocks:
         if ok: cands.append(l)
     # 行内小标题（IEEE 的“1) Master Tool Manipulator: As seen …”“Abstract— Robotic …”）：
     # 标题在行首、正文接在同一行，标题按行首匹配，正文在行首 40 个字符以内匹配
-    if not [c for c in cands if prev is None or key(c) >= key(prev)]:
+    # 只在常规匹配一个都找不到时启用；正文的起点必须落在这一行之内（前面是同一行的小标题），
+    # 否则上一段的末行加上下一段的开头也会被误认成“行内小标题”
+    if not cands:
         for l in (x for x in L if not post or REFPOS is None or (x['page'], x['y']) > REFPOS):
             if kind == 'head':
                 ok = len(pat) >= 6 and re.match(r'[a-z]?\d{0,2}' + re.escape(pat), l['n']) is not None
             else:
                 m = re.search(pat, l['n3'][:40 + len(pat)])
-                ok = bool(l['n']) and m is not None and m.start() <= 40
+                ok = bool(l['n']) and m is not None and 0 < m.start() <= min(40, len(l['n']) - 4)
             if ok: cands.append(l)
     if not cands and b['type'] in ('figure', 'table'):
         for key_ in label_keys(b):
